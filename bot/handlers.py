@@ -1,17 +1,10 @@
-import re
 from telegram import Update
 from telegram.ext import ContextTypes
+from bot.validator import is_checkin
 from datastore import sheets
-from datastore.models import CheckIn
-from utils.time_utils import utc_to_edt, is_late
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-CHECKIN_REGEX = re.compile(
-    r"\b(online|i'?m\s+online|checking\s+in|check\s*[‑\-]?\s*in|present|here|good\s+morning|gm)\b",
-    re.IGNORECASE,
-)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -26,7 +19,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = msg.from_user.id
     intern = sheets.get_intern_by_telegram_id(user_id)
 
-    if not CHECKIN_REGEX.search(msg.text):
+    if not is_checkin(msg.text):
         return
 
     if intern is None:

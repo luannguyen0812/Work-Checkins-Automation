@@ -1,0 +1,24 @@
+[Unit]
+Description=Intern Check-In Dashboard (Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/intern-checkin-bot
+EnvironmentFile=/opt/intern-checkin-bot/.env
+ExecStart=/opt/intern-checkin-bot/.venv/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:5050 \
+    --timeout 60 \
+    --access-logfile logs/gunicorn-access.log \
+    --error-logfile logs/gunicorn-error.log \
+    wsgi:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=intern-checkin-dashboard
+
+[Install]
+WantedBy=multi-user.target

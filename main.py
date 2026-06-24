@@ -29,9 +29,10 @@ async def main():
     scheduler.start()
     logger.info("Scheduler started")
 
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask admin API started on :5050")
+    if os.environ.get("FLASK_ENABLED", "true").lower() == "true":
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info("Flask admin API started on :5050")
 
     logger.info("Bot starting")
     await application.run_polling()

@@ -1,6 +1,5 @@
-import re
 import pytest
-from bot.handlers import CHECKIN_REGEX
+from bot.validator import CHECKIN_REGEX
 
 
 @pytest.mark.parametrize("text", [
