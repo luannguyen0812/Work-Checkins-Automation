@@ -29,6 +29,13 @@ def checkin_sheet_name(iso_week: int, year: int) -> str:
     return f"CHECKINS_{year}_{iso_week:02d}"
 
 
+def get_source_team_members() -> list[dict]:
+    """Read directly from 'Team Members' tab — the source of truth roster."""
+    ss = _get_spreadsheet()
+    ws = ss.worksheet("Team Members")
+    return ws.get_all_records()
+
+
 def get_all_interns() -> list[Intern]:
     raise NotImplementedError
 

@@ -2,8 +2,9 @@ import os
 from datetime import timedelta
 from flask import Flask, jsonify, request, abort, render_template, redirect, url_for, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from admin.auth import get_user_by_id, get_user_by_username, get_all_users, create_user, delete_user, ensure_default_admin
+from admin.auth import get_user_by_id, get_user_by_username, get_all_users, create_user, delete_user
 from datastore import sheets
+from datastore.sheets import get_source_team_members
 from datastore.queries import compute_all_risk_scores
 from utils.time_utils import edt_now
 
@@ -127,34 +128,27 @@ def dashboard():
 @app.get("/interns")
 @login_required
 def interns_page():
-    now = edt_now()
-    week_num = now.isocalendar().week
-
-    try:
-        all_interns = sheets.get_all_interns()
-        scores_map = {}
-        try:
-            for s in compute_all_risk_scores(week_num, now.year):
-                scores_map[s.intern_id] = s
-        except NotImplementedError:
-            pass
-
-        rows = []
-        for i in [x for x in all_interns if x.active]:
-            s = scores_map.get(i.intern_id)
-            rows.append({
-                "name": i.full_name,
-                "initials": "".join(p[0].upper() for p in i.full_name.split()[:2]),
-                "role": getattr(i, "notes", "") or "Intern",
-                "days": ["absent"] * 5,
-                "rate": round(s.war * 100) if s else 0,
-                "risk": s.risk_band if s else "GREEN",
-                "streak": s.cas if s else 0,
-            })
-        rows.sort(key=lambda x: x["rate"])
-    except NotImplementedError:
-        rows = []
-
+    members = get_source_team_members()
+    avatar_colors = [
+        "bg-blue-600","bg-green-600","bg-purple-600","bg-orange-500",
+        "bg-pink-600","bg-teal-600","bg-indigo-600","bg-cyan-600",
+        "bg-rose-600","bg-violet-600",
+    ]
+    rows = []
+    for idx, m in enumerate(members):
+        name = m.get("Full Name", "").strip()
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "initials": "".join(p[0].upper() for p in name.split()[:2]),
+            "email": m.get("Google Account", "—").strip(),
+            "role": m.get("Role", "—").strip(),
+            "department": m.get("Team/Department", "—").strip(),
+            "shift": m.get("Preferred Shift | Interns Hours", "—").strip(),
+            "inducted": m.get("Induction Y/N", "").strip().upper() == "Y",
+            "color": avatar_colors[idx % len(avatar_colors)],
+        })
     return render_template("interns.html", active="interns", now=_now_str(), interns=rows)
 
 
