@@ -23,6 +23,9 @@ logs/
 .coverage
 htmlcov/
 
+# User accounts (contains password hashes)
+admin/users.json
+
 # macOS
 .DS_Store
 

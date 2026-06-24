@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Weekly Data{% endblock %}
+{% block heading %}Weekly Data{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div class="card rounded-xl p-5">
+    <h2 class="text-sm font-medium text-slate-300 mb-4">8-Week Attendance Trend</h2>
+    <div style="height:300px">
+      <canvas id="weeklyTrend"></canvas>
+    </div>
+  </div>
+
+  <div class="card rounded-xl overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-700">
+      <h2 class="text-sm font-medium text-slate-300">Week-by-Week Summary</h2>
+    </div>
+    {% if weekly_rows %}
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-xs text-slate-500 uppercase tracking-widest border-b border-slate-700">
+          <th class="text-left px-6 py-3">Week</th>
+          <th class="text-left px-4 py-3">Date Range</th>
+          <th class="text-left px-4 py-3">Avg Rate</th>
+          <th class="text-left px-4 py-3">Green</th>
+          <th class="text-left px-4 py-3">Amber</th>
+          <th class="text-left px-4 py-3">Red</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in weekly_rows %}
+        <tr class="border-b border-slate-800 hover:bg-slate-800/30 transition">
+          <td class="px-6 py-3 font-medium text-white">W{{ row.week }}</td>
+          <td class="px-4 py-3 text-slate-400">{{ row.date_range }}</td>
+          <td class="px-4 py-3 font-semibold {% if row.rate >= 85 %}text-green-400{% elif row.rate >= 70 %}text-yellow-400{% else %}text-red-400{% endif %}">{{ row.rate }}%</td>
+          <td class="px-4 py-3 text-green-400">{{ row.green }}</td>
+          <td class="px-4 py-3 text-yellow-400">{{ row.amber }}</td>
+          <td class="px-4 py-3 text-red-400">{{ row.red }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="py-20 text-center text-slate-600">
+      <p class="text-4xl mb-3">📅</p>
+      <p class="text-sm">Weekly summaries appear here after the first Friday report.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+new Chart(document.getElementById('weeklyTrend'), {
+  type: 'line',
+  data: {
+    labels: {{ week_labels | tojson }},
+    datasets: [{
+      label: 'Avg Attendance',
+      data: {{ trend_data | tojson }},
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,0.08)',
+      borderWidth: 2,
+      pointBackgroundColor: '#3b82f6',
+      pointRadius: 4,
+      fill: true,
+      tension: 0.3,
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {
+      y: { min: 0, max: 100, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: '#1e293b' } },
+      x: { ticks: { color: '#64748b' }, grid: { display: false } }
+    },
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ` ${ctx.raw}%` }}}
+  }
+});
+</script>
+{% endblock %}

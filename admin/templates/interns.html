@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Interns{% endblock %}
+{% block heading %}Interns{% endblock %}
+
+{% block content %}
+<div class="card rounded-xl overflow-hidden">
+  <div class="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+    <p class="text-sm text-slate-400">{{ interns|length }} active interns</p>
+    <span class="text-xs text-slate-500">Mon – Fri this week</span>
+  </div>
+  {% if interns %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-xs text-slate-500 uppercase tracking-widest border-b border-slate-700">
+          <th class="text-left px-6 py-3">Name</th>
+          <th class="text-left px-4 py-3">Role</th>
+          <th class="px-4 py-3">Mon</th>
+          <th class="px-4 py-3">Tue</th>
+          <th class="px-4 py-3">Wed</th>
+          <th class="px-4 py-3">Thu</th>
+          <th class="px-4 py-3">Fri</th>
+          <th class="text-left px-4 py-3">Rate</th>
+          <th class="text-left px-4 py-3">Risk</th>
+          <th class="text-left px-4 py-3">Streak</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in interns %}
+        <tr class="border-b border-slate-800 hover:bg-slate-800/30 transition">
+          <td class="px-6 py-3">
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">{{ i.initials }}</div>
+              <span class="font-medium text-white">{{ i.name }}</span>
+            </div>
+          </td>
+          <td class="px-4 py-3 text-slate-400 text-xs">{{ i.role }}</td>
+          {% for day in i.days %}
+          <td class="px-4 py-3 text-center text-base">
+            {% if day == 'present' %}✅{% elif day == 'late' %}⏰{% elif day == 'absent' %}❌{% else %}<span class="text-slate-700">—</span>{% endif %}
+          </td>
+          {% endfor %}
+          <td class="px-4 py-3 font-semibold {% if i.rate >= 85 %}text-green-400{% elif i.rate >= 70 %}text-yellow-400{% else %}text-red-400{% endif %}">{{ i.rate }}%</td>
+          <td class="px-4 py-3">
+            {% if i.risk == 'GREEN' %}<span class="text-xs px-2 py-0.5 rounded bg-green-950/60 border border-green-800 text-green-400">GREEN</span>
+            {% elif i.risk == 'AMBER' %}<span class="text-xs px-2 py-0.5 rounded bg-yellow-950/60 border border-yellow-800 text-yellow-400">AMBER</span>
+            {% else %}<span class="text-xs px-2 py-0.5 rounded bg-red-950/60 border border-red-800 text-red-400">RED</span>{% endif %}
+          </td>
+          <td class="px-4 py-3 text-slate-400 text-xs">{{ i.streak }}d abs.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="py-20 text-center text-slate-600">
+    <p class="text-4xl mb-3">📋</p>
+    <p class="text-sm">No intern data yet. Populate the ROSTER sheet to get started.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

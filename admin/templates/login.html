@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Login · Intern Check-In</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen flex items-center justify-center" style="background-color:#0d1117">
+  <div class="w-full max-w-sm">
+    <!-- Logo -->
+    <div class="text-center mb-8">
+      <div class="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-3">IC</div>
+      <h1 class="text-xl font-semibold text-white">Intern Check-In</h1>
+      <p class="text-sm text-slate-500 mt-1">Admin Dashboard</p>
+    </div>
+
+    <!-- Card -->
+    <div class="rounded-xl p-7 border border-slate-700" style="background-color:#1e293b">
+      {% if error %}
+        <div class="mb-4 px-4 py-3 rounded-lg bg-red-950/60 border border-red-800 text-red-400 text-sm">{{ error }}</div>
+      {% endif %}
+
+      <form method="POST" action="/login" class="space-y-4">
+        <div>
+          <label class="block text-sm text-slate-400 mb-1.5">Username</label>
+          <input name="username" type="text" required autofocus
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
+            style="background-color:#0f172a"
+            placeholder="admin"/>
+        </div>
+        <div>
+          <label class="block text-sm text-slate-400 mb-1.5">Password</label>
+          <input name="password" type="password" required
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
+            style="background-color:#0f172a"
+            placeholder="••••••••"/>
+        </div>
+        <button type="submit"
+          class="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">
+          Sign in
+        </button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
