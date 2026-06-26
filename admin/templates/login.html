@@ -3,45 +3,86 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Login · Intern Check-In</title>
+  <title>Sign in · Intern Check-In</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    body {
+      background: #0d1117;
+      background-image:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99,102,241,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 40% at 80% 80%, rgba(79,70,229,0.06) 0%, transparent 50%);
+    }
+    .card {
+      background: #161b22;
+      border: 1px solid #21262d;
+    }
+    input {
+      background: #0d1117 !important;
+      border: 1px solid #30363d;
+      color: #f0f6fc;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    input::placeholder { color: #484f58; }
+    .btn-submit {
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+      box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+      transition: opacity 0.15s, box-shadow 0.15s;
+      cursor: pointer;
+    }
+    .btn-submit:hover { opacity: 0.9; box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
+    label { color: #8b949e; }
+  </style>
 </head>
-<body class="min-h-screen flex items-center justify-center" style="background-color:#0d1117">
-  <div class="w-full max-w-sm">
+<body class="min-h-screen flex items-center justify-center">
+
+  <div class="w-full max-w-sm px-4">
+
     <!-- Logo -->
     <div class="text-center mb-8">
-      <div class="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-3">IC</div>
-      <h1 class="text-xl font-semibold text-white">Intern Check-In</h1>
-      <p class="text-sm text-slate-500 mt-1">Admin Dashboard</p>
+      <div class="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center"
+        style="background:linear-gradient(135deg,#4f46e5,#6366f1);box-shadow:0 8px 24px rgba(99,102,241,0.4)">
+        <svg class="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+      </div>
+      <h1 class="text-xl font-semibold text-white tracking-tight">Intern Check-In</h1>
+      <p class="text-sm mt-1" style="color:#8b949e">Admin Dashboard</p>
     </div>
 
     <!-- Card -->
-    <div class="rounded-xl p-7 border border-slate-700" style="background-color:#1e293b">
+    <div class="card rounded-2xl p-7">
       {% if error %}
-        <div class="mb-4 px-4 py-3 rounded-lg bg-red-950/60 border border-red-800 text-red-400 text-sm">{{ error }}</div>
+        <div class="mb-5 px-4 py-3 rounded-xl text-sm" style="background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.3);color:#f85149">
+          {{ error }}
+        </div>
       {% endif %}
 
       <form method="POST" action="/login" class="space-y-4">
         <div>
-          <label class="block text-sm text-slate-400 mb-1.5">Username</label>
-          <input name="username" type="text" required autofocus
-            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-            style="background-color:#0f172a"
-            placeholder="admin"/>
+          <label class="block text-xs font-medium mb-2 tracking-wide uppercase">Username</label>
+          <input name="username" type="text" required autofocus placeholder="admin"
+            class="w-full px-4 py-2.5 rounded-xl text-sm"/>
         </div>
         <div>
-          <label class="block text-sm text-slate-400 mb-1.5">Password</label>
-          <input name="password" type="password" required
-            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-            style="background-color:#0f172a"
-            placeholder="••••••••"/>
+          <label class="block text-xs font-medium mb-2 tracking-wide uppercase">Password</label>
+          <input name="password" type="password" required placeholder="••••••••"
+            class="w-full px-4 py-2.5 rounded-xl text-sm"/>
         </div>
         <button type="submit"
-          class="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">
+          class="btn-submit w-full py-2.5 px-4 text-white text-sm font-semibold rounded-xl mt-2">
           Sign in
         </button>
       </form>
     </div>
+
+    <p class="text-center text-xs mt-6" style="color:#484f58">
+      Intern Check-In Bot · Admin Portal
+    </p>
   </div>
+
 </body>
 </html>

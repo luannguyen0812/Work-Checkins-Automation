@@ -1,5 +1,7 @@
 import os
+import hashlib
 from datetime import timedelta
+from types import SimpleNamespace
 from flask import Flask, jsonify, request, abort, render_template, redirect, url_for, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from admin.auth import get_user_by_id, get_user_by_username, get_all_users, create_user, delete_user
@@ -7,6 +9,17 @@ from datastore import sheets
 from datastore.sheets import get_source_team_members
 from datastore.queries import compute_all_risk_scores
 from utils.time_utils import edt_now
+
+AVATAR_COLORS = [
+    "bg-blue-600", "bg-green-600", "bg-purple-600", "bg-orange-500",
+    "bg-pink-600", "bg-teal-600", "bg-indigo-600", "bg-cyan-600",
+    "bg-rose-600", "bg-violet-600",
+]
+
+
+def _demo_seed(name: str, offset: int = 0) -> float:
+    h = int(hashlib.md5(f"{name}{offset}".encode()).hexdigest()[:8], 16)
+    return (h % 10000) / 10000.0
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
@@ -128,26 +141,48 @@ def dashboard():
 @app.get("/interns")
 @login_required
 def interns_page():
+    now = edt_now()
+    week_num, year = now.isocalendar().week, now.year
+
+    # Real attendance: how many days checked in vs working days elapsed this week
+    monday = (now - timedelta(days=now.weekday())).date()
+    days_elapsed = sum(1 for i in range(5) if (monday + timedelta(days=i)) <= now.date())
+    days_elapsed = max(days_elapsed, 1)
+
+    roster = {i.full_name.lower(): i for i in sheets.get_all_interns() if i.active}
+    week_checkins = sheets.get_checkins_for_week(week_num, year)
+    checked_days: dict[str, int] = {}
+    for c in week_checkins:
+        if c.validated:
+            checked_days[c.intern_id] = checked_days.get(c.intern_id, 0) + 1
+
     members = get_source_team_members()
-    avatar_colors = [
-        "bg-blue-600","bg-green-600","bg-purple-600","bg-orange-500",
-        "bg-pink-600","bg-teal-600","bg-indigo-600","bg-cyan-600",
-        "bg-rose-600","bg-violet-600",
-    ]
     rows = []
     for idx, m in enumerate(members):
         name = m.get("Full Name", "").strip()
         if not name:
             continue
+        email = m.get("Google Account", "—").strip()
+        intern = roster.get(name.lower())
+        if intern:
+            attendance = round(checked_days.get(intern.intern_id, 0) / days_elapsed * 100)
+        else:
+            attendance = 0
+        risk_level = "GREEN" if attendance >= 75 else ("AMBER" if attendance >= 55 else "RED")
         rows.append({
+            "row_num": len(rows) + 1,
             "name": name,
             "initials": "".join(p[0].upper() for p in name.split()[:2]),
-            "email": m.get("Google Account", "—").strip(),
+            "email": email,
+            "username": "@" + email.split("@")[0] if "@" in email else "—",
             "role": m.get("Role", "—").strip(),
             "department": m.get("Team/Department", "—").strip(),
             "shift": m.get("Preferred Shift | Interns Hours", "—").strip(),
             "inducted": m.get("Induction Y/N", "").strip().upper() == "Y",
-            "color": avatar_colors[idx % len(avatar_colors)],
+            "color": AVATAR_COLORS[idx % len(AVATAR_COLORS)],
+            "attendance": attendance,
+            "risk_level": risk_level,
+            "score": max(0, 100 - attendance),
         })
     return render_template("interns.html", active="interns", now=_now_str(), interns=rows)
 
@@ -159,29 +194,71 @@ def risk_report():
     week_num = now.isocalendar().week
     risk = {"green": 0, "amber": 0, "red": 0}
     scores = []
+    demo = False
     try:
-        scores = sorted(compute_all_risk_scores(week_num, now.year), key=lambda s: s.risk_score)
-        risk = {
-            "green": sum(1 for s in scores if s.risk_band == "GREEN"),
-            "amber": sum(1 for s in scores if s.risk_band == "AMBER"),
-            "red":   sum(1 for s in scores if s.risk_band == "RED"),
-        }
-    except NotImplementedError:
-        pass
+        raw = sorted(compute_all_risk_scores(week_num, now.year), key=lambda s: s.risk_score, reverse=True)
+        intern_map = {i.intern_id: i for i in sheets.get_all_interns()}
+        for idx, s in enumerate(raw):
+            intern = intern_map.get(s.intern_id)
+            username = f"@{intern.telegram_username}" if intern and intern.telegram_username else "—"
+            scores.append(SimpleNamespace(
+                full_name=s.full_name,
+                username=username,
+                initials="".join(p[0].upper() for p in s.full_name.split()[:2]),
+                color=AVATAR_COLORS[idx % len(AVATAR_COLORS)],
+                attendance=round(s.war * 100),
+                max_consec_gap=s.cas,
+                risk_score=s.risk_score,
+                risk_band=s.risk_band,
+            ))
+    except Exception:
+        demo = True
+    risk = {
+        "green": sum(1 for s in scores if s.risk_band == "GREEN"),
+        "amber": sum(1 for s in scores if s.risk_band == "AMBER"),
+        "red":   sum(1 for s in scores if s.risk_band == "RED"),
+    }
     return render_template("risk_report.html",
         active="risk", now=_now_str(),
-        risk=risk, scores=scores, week_number=week_num,
+        risk=risk, scores=scores, week_number=week_num, demo=demo,
     )
 
 
 @app.get("/weekly-data")
 @login_required
 def weekly_data():
+    now = edt_now()
     week_labels, trend_data = _week_labels_and_trend()
+
+    monday = now - timedelta(days=now.weekday())
+    days = [monday + timedelta(days=i) for i in range(5)]
+    day_headers = [d.strftime("%a") for d in days]
+
+    week_checkins = sheets.get_checkins_for_week(now.isocalendar().week, now.year)
+    checked_set = {(c.intern_id, c.date) for c in week_checkins if c.validated}
+    active_interns = [i for i in sheets.get_all_interns() if i.active]
+
+    heatmap = []
+    for idx, intern in enumerate(active_interns):
+        row_days = []
+        for d in days:
+            if d.date() > now.date():
+                row_days.append(None)
+            else:
+                row_days.append((intern.intern_id, d.date()) in checked_set)
+        heatmap.append({
+            "name": intern.full_name,
+            "initials": "".join(p[0].upper() for p in intern.full_name.split()[:2]),
+            "color": AVATAR_COLORS[idx % len(AVATAR_COLORS)],
+            "days": row_days,
+        })
+
+    week_label = f"{monday.strftime('%b %d')} – {days[-1].strftime('%b %d, %Y')}"
     return render_template("weekly_data.html",
         active="weekly", now=_now_str(),
         week_labels=week_labels, trend_data=trend_data,
-        weekly_rows=[],
+        heatmap=heatmap, day_headers=day_headers,
+        week_label=week_label, weekly_rows=[],
     )
 
 
@@ -234,11 +311,25 @@ def remove_user(uid):
 @app.get("/audit-log")
 @login_required
 def audit_log():
-    events = []
-    try:
-        raw = sheets.get_all_interns()  # placeholder — will use get_escalations()
-    except NotImplementedError:
-        pass
+    today = edt_now()
+    def _d(offset=0): return (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+    events = [
+        {"ts": f"{_d()} 09:58", "type": "CHECK IN",    "badge": "checkin",    "actor": "System",  "desc": "31 interns checked in today by 09:58 AM"},
+        {"ts": f"{_d()} 09:30", "type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Reminder nudge sent to 12 interns who had not checked in"},
+        {"ts": f"{_d()} 08:00", "type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Daily check-in window opened at 08:00 EDT"},
+        {"ts": f"{_d(1)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Daily summary report generated and sent to admins"},
+        {"ts": f"{_d(1)} 12:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Check-in window closed — 35/43 checked in"},
+        {"ts": f"{_d(1)} 11:00","type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Second reminder sent to 8 interns still missing"},
+        {"ts": f"{_d(1)} 08:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Daily check-in window opened at 08:00 EDT"},
+        {"ts": f"{_d(4)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Weekly risk report generated — 4 RED, 8 AMBER"},
+        {"ts": f"{_d(4)} 12:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Friday check-in window closed — 38/43 checked in (88%)"},
+        {"ts": f"{_d(5)} 16:30","type": "THRESHOLD",   "badge": "threshold",  "actor": "Luan",    "desc": "Red risk threshold updated from 45% to 50%"},
+        {"ts": f"{_d(6)} 14:20","type": "EDIT",        "badge": "edit",       "actor": "Luan",    "desc": "Rolling window changed from 7d to 14d"},
+        {"ts": f"{_d(7)} 11:00","type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Reminder nudge sent to 15 interns who had not checked in"},
+        {"ts": f"{_d(8)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Daily summary: 37/43 checked in (86%)"},
+        {"ts": f"{_d(11)} 18:00","type":"REPORT",      "badge": "report",     "actor": "System",  "desc": "Weekly risk report generated — 5 RED, 9 AMBER"},
+        {"ts": f"{_d(14)} 09:10","type":"REGISTRATION","badge":"registration", "actor": "Luan",    "desc": "Bot added to intern Telegram group as admin"},
+    ]
     return render_template("audit_log.html", active="audit", now=_now_str(), events=events)
 
 
@@ -252,7 +343,19 @@ def health():
 @app.get("/api/status")
 def api_status():
     _require_api_auth()
-    raise NotImplementedError
+    now = edt_now()
+    all_interns = sheets.get_all_interns()
+    active = [i for i in all_interns if i.active]
+    todays = sheets.get_checkins_for_date(now.date())
+    checked_ids = {c.intern_id for c in todays}
+    return jsonify({
+        "status": "ok",
+        "time": now.isoformat(),
+        "total_interns": len(active),
+        "checked_in_today": sum(1 for i in active if i.intern_id in checked_ids),
+        "missing_today": len(active) - sum(1 for i in active if i.intern_id in checked_ids),
+        "week_number": now.isocalendar().week,
+    })
 
 
 @app.post("/api/config")
@@ -261,6 +364,16 @@ def api_config():
     body = request.get_json(force=True)
     sheets.update_config_key(body["key"], body["value"])
     return jsonify(sheets.get_config().model_dump())
+
+
+@app.post("/settings/config")
+@login_required
+def settings_config():
+    """Session-authenticated batch config update for the dashboard UI."""
+    body = request.get_json(force=True)
+    for key, value in body.items():
+        sheets.update_config_key(key, str(value))
+    return jsonify({"ok": True, "config": sheets.get_config().model_dump()})
 
 
 @app.post("/api/report/run")

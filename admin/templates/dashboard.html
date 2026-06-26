@@ -53,7 +53,7 @@
     <div class="grid grid-cols-3 gap-3">
       {% set avatar_colors = ['bg-blue-600','bg-green-600','bg-red-600','bg-purple-600','bg-orange-500','bg-pink-600','bg-teal-600','bg-indigo-600','bg-cyan-600','bg-rose-600'] %}
       {% for intern in missing_today %}
-      <div class="flex items-center gap-3 px-4 py-3 rounded-lg border border-slate-700" style="background-color:#0f172a">
+      <div class="flex items-center gap-3 px-4 py-3 rounded-lg" style="background:var(--sidebar);border:1px solid var(--border)">
         <div class="w-9 h-9 rounded-full {{ avatar_colors[loop.index0 % avatar_colors|length] }} flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
           {{ intern.initials }}
         </div>
@@ -72,8 +72,13 @@
   </div>
   {% else %}
   <div class="card rounded-xl p-10 text-center">
-    <p class="text-3xl mb-2">🎉</p>
-    <p class="text-sm text-slate-400">Everyone has checked in today!</p>
+    <div class="empty-icon success">
+      <svg class="w-6 h-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+    </div>
+    <p class="text-sm font-medium text-white mb-1">All checked in</p>
+    <p class="text-xs" style="color:var(--text-muted)">Everyone has submitted their check-in today.</p>
   </div>
   {% endif %}
 
@@ -85,13 +90,13 @@ const donut = new Chart(document.getElementById('donutChart'), {
   data: {
     datasets: [{
       data: [{{ checked_in_today }}, {{ missing_count }}],
-      backgroundColor: ['#22c55e', '#ef4444'],
+      backgroundColor: ['#6366f1', '#1c2128'],
       borderWidth: 0,
       hoverOffset: 4,
     }]
   },
   options: {
-    cutout: '72%',
+    cutout: '74%',
     plugins: { legend: { display: false }, tooltip: { callbacks: {
       label: ctx => ` ${ctx.raw} interns`
     }}},
@@ -106,21 +111,23 @@ const trend = new Chart(document.getElementById('trendChart'), {
     labels: {{ week_labels | tojson }},
     datasets: [{
       data: {{ trend_data | tojson }},
-      borderColor: '#3b82f6',
-      backgroundColor: 'rgba(59,130,246,0.08)',
+      borderColor: '#6366f1',
+      backgroundColor: 'rgba(99,102,241,0.08)',
       borderWidth: 2,
-      pointBackgroundColor: '#3b82f6',
+      pointBackgroundColor: '#6366f1',
+      pointBorderColor: '#0d1117',
+      pointBorderWidth: 2,
       pointRadius: 4,
       fill: true,
-      tension: 0.3,
+      tension: 0.4,
     }]
   },
   options: {
     responsive: true,
     maintainAspectRatio: false,
     scales: {
-      y: { min: 60, max: 100, ticks: { color: '#64748b', callback: v => v + '%' }, grid: { color: '#1e293b' } },
-      x: { ticks: { color: '#64748b' }, grid: { display: false } }
+      y: { min: 60, max: 100, ticks: { color: '#8b949e', callback: v => v + '%' }, grid: { color: '#21262d' } },
+      x: { ticks: { color: '#8b949e' }, grid: { display: false } }
     },
     plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ` ${ctx.raw}%` }}}
   }

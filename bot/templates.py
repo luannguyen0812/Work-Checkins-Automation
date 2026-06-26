@@ -1,9 +1,8 @@
 def morning_reminder(cutoff_time: str = "17:00") -> str:
     return (
         f"☀️ Good morning, interns! Day has started.\n\n"
-        f"Please send your \"I'm online\" check-in message here to be marked present.\n"
-        f"Cutoff: {cutoff_time} EDT. Early check-ins appreciated!\n\n"
-        f"[Auto-reminder — reply in this chat to check in]"
+        f"Please send your check-in message in this group (e.g. \"I'm online\" or \"checking in\") to be marked present.\n"
+        f"Cutoff: {cutoff_time} EDT. Early check-ins appreciated!"
     )
 
 

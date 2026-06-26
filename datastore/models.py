@@ -14,6 +14,8 @@ class Intern(BaseModel):
     active: bool = True
     email: Optional[str] = None
     notes: Optional[str] = None
+    schedule_json: Optional[str] = None  # JSON: list of {days, start, end} segments in ET
+    schedule_raw: Optional[str] = None   # raw col E text — used to detect Team Members changes
 
 
 class CheckIn(BaseModel):

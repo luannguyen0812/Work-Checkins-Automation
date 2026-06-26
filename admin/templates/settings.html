@@ -3,10 +3,157 @@
 {% block heading %}Settings{% endblock %}
 
 {% block content %}
-<div class="grid grid-cols-2 gap-6">
+<div class="space-y-6">
 
-  <!-- User Management -->
-  <div class="space-y-4">
+  <!-- Toast notification -->
+  <div id="toast" class="fixed top-5 right-5 z-50 hidden px-5 py-3 rounded-xl text-sm font-medium shadow-lg transition-all"></div>
+
+  <!-- Row 1: Schedule + Risk Thresholds -->
+  <div class="grid grid-cols-2 gap-6">
+
+    <!-- Schedule -->
+    <div class="card rounded-xl p-6">
+      <h2 class="text-sm font-semibold text-slate-200 mb-1">Schedule</h2>
+      <p class="text-xs text-slate-500 mb-5">Bot reminder timing and reporting cadence</p>
+
+      <div class="space-y-4">
+        <div>
+          <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Morning Reminder</label>
+          <input id="morning_reminder_time" type="time"
+            value="{{ config.morning_reminder_time if config else '09:00' }}"
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+            style="background-color:#0f172a; color-scheme:dark"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Midday Reminder</label>
+          <input id="second_reminder_time" type="time"
+            value="{{ config.second_reminder_time if config else '11:30' }}"
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+            style="background-color:#0f172a; color-scheme:dark"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Pre-Cutoff Alert</label>
+          <input id="precut_reminder_time" type="time"
+            value="{{ config.precut_reminder_time if config else '17:45' }}"
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+            style="background-color:#0f172a; color-scheme:dark"/>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Check-In Cutoff</label>
+          <input id="checkin_cutoff_time" type="time"
+            value="{{ config.checkin_cutoff_time if config else '18:30' }}"
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+            style="background-color:#0f172a; color-scheme:dark"/>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Report Day</label>
+            <select id="report_day"
+              class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+              style="background-color:#07070f">
+              {% set days = ['Monday','Tuesday','Wednesday','Thursday','Friday'] %}
+              {% for i, d in [(0,'Monday'),(1,'Tuesday'),(2,'Wednesday'),(3,'Thursday'),(4,'Friday')] %}
+              <option value="{{ i }}" {% if config and config.report_day == i %}selected{% endif %}>{{ d }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Report Time</label>
+            <input id="report_time" type="time"
+              value="{{ config.report_time if config else '18:00' }}"
+              class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+              style="background-color:#0f172a; color-scheme:dark"/>
+          </div>
+        </div>
+        <button onclick="saveSection('schedule')"
+          class="btn-primary w-full py-2.5 px-4 text-sm rounded-lg">
+          Save Schedule
+        </button>
+      </div>
+    </div>
+
+    <!-- Risk Thresholds -->
+    <div class="card rounded-xl p-6">
+      <h2 class="text-sm font-semibold text-slate-200 mb-1">Risk Thresholds</h2>
+      <p class="text-xs text-slate-500 mb-5">Configure when interns are flagged for risk</p>
+
+      <div class="space-y-5">
+        <div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-slate-400 uppercase tracking-widest">Red Threshold</span>
+            <span id="redVal" class="text-red-400 font-semibold tabular-nums">
+              {{ (config.risk_red_threshold * 100)|int if config else 50 }}%
+            </span>
+          </div>
+          <input id="redSlider" type="range" min="20" max="80"
+            value="{{ (config.risk_red_threshold * 100)|int if config else 50 }}"
+            oninput="updateSlider(this, 'redVal', '#ef4444')"
+            class="w-full h-1.5 rounded-full appearance-none cursor-pointer"/>
+        </div>
+
+        <div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-slate-400 uppercase tracking-widest">Amber Threshold</span>
+            <span id="amberVal" class="text-yellow-400 font-semibold tabular-nums">
+              {{ (config.risk_amber_threshold * 100)|int if config else 70 }}%
+            </span>
+          </div>
+          <input id="amberSlider" type="range" min="50" max="95"
+            value="{{ (config.risk_amber_threshold * 100)|int if config else 70 }}"
+            oninput="updateSlider(this, 'amberVal', '#eab308')"
+            class="w-full h-1.5 rounded-full appearance-none cursor-pointer"/>
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Max Consecutive Absences</label>
+          <input id="streak_concern_days" type="number"
+            value="{{ config.streak_concern_days if config else 3 }}"
+            min="1" max="30"
+            class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+            style="background-color:#07070f"/>
+        </div>
+
+        <button onclick="saveSection('risk')"
+          class="btn-primary w-full py-2.5 px-4 text-sm rounded-lg">
+          Save Thresholds
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 2: Data Management -->
+  <div class="card rounded-xl p-6">
+    <h2 class="text-sm font-semibold text-slate-200 mb-1">Data Management</h2>
+    <p class="text-xs text-slate-500 mb-5">Retention policies and manual actions</p>
+    <div class="flex items-end gap-4 flex-wrap">
+      <div class="flex-1 min-w-40">
+        <label class="text-xs text-slate-400 uppercase tracking-widest block mb-1.5">Retention Period (weeks)</label>
+        <select id="retention_weeks"
+          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+          style="background-color:#07070f">
+          {% for w in [4, 8, 12, 24, 52] %}
+          <option value="{{ w }}" {% if config and config.retention_weeks == w %}selected{% endif %}>{{ w }} weeks</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button onclick="saveSection('data')"
+        class="btn-primary px-5 py-2.5 text-sm rounded-lg">
+        Save Retention
+      </button>
+      <button onclick="triggerReport()"
+        class="px-5 py-2.5 bg-violet-700 hover:bg-violet-600 text-white text-sm font-medium rounded-lg transition">
+        Trigger Weekly Report Now
+      </button>
+      <button onclick="if(confirm('Purge all data older than the retention period? This cannot be undone.')) purgeData()"
+        class="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition">
+        Purge Old Data
+      </button>
+    </div>
+  </div>
+
+  <!-- Row 3: User Management -->
+  <div class="grid grid-cols-2 gap-6">
+
     <div class="card rounded-xl overflow-hidden">
       <div class="px-6 py-4 border-b border-slate-700">
         <h2 class="text-sm font-medium text-slate-300">Dashboard Users</h2>
@@ -16,14 +163,16 @@
         {% for u in users %}
         <div class="px-6 py-3 flex items-center justify-between">
           <div class="flex items-center gap-3">
-            <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">{{ u.display_name[0]|upper }}</div>
+            <div class="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold"
+              style="background:linear-gradient(135deg,#7c3aed,#a855f7)">{{ u.display_name[0]|upper }}</div>
             <div>
               <p class="text-sm text-white font-medium">{{ u.display_name }}</p>
               <p class="text-xs text-slate-500">@{{ u.username }} · {{ u.role }}</p>
             </div>
           </div>
           {% if u.id != current_user.id %}
-          <form method="POST" action="/settings/users/delete/{{ u.id }}" onsubmit="return confirm('Delete {{ u.username }}?')">
+          <form method="POST" action="/settings/users/delete/{{ u.id }}"
+            onsubmit="return confirm('Delete {{ u.username }}?')">
             <button class="text-slate-600 hover:text-red-400 transition text-xs">Remove</button>
           </form>
           {% else %}
@@ -34,55 +183,101 @@
       </div>
     </div>
 
-    <!-- Add User -->
     <div class="card rounded-xl p-5">
       <h2 class="text-sm font-medium text-slate-300 mb-4">Add User</h2>
       {% if user_error %}<p class="text-xs text-red-400 mb-3">{{ user_error }}</p>{% endif %}
       {% if user_success %}<p class="text-xs text-green-400 mb-3">{{ user_success }}</p>{% endif %}
       <form method="POST" action="/settings/users/add" class="space-y-3">
         <input name="display_name" type="text" placeholder="Full name" required
-          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-          style="background-color:#0f172a"/>
+          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+          style="background-color:#07070f"/>
         <input name="username" type="text" placeholder="Username" required
-          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-          style="background-color:#0f172a"/>
+          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+          style="background-color:#07070f"/>
         <input name="password" type="password" placeholder="Password" required
-          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-          style="background-color:#0f172a"/>
+          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+          style="background-color:#07070f"/>
         <select name="role"
-          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-blue-500"
-          style="background-color:#0f172a">
+          class="w-full px-3 py-2 rounded-lg text-sm text-white border border-slate-600 focus:outline-none focus:border-violet-600"
+          style="background-color:#07070f">
           <option value="viewer">Viewer</option>
           <option value="admin">Admin</option>
         </select>
-        <button type="submit" class="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">
+        <button type="submit" class="btn-primary w-full py-2 px-4 text-sm rounded-lg">
           Create Account
         </button>
       </form>
     </div>
   </div>
 
-  <!-- Bot Config -->
-  <div class="card rounded-xl overflow-hidden">
-    <div class="px-6 py-4 border-b border-slate-700">
-      <h2 class="text-sm font-medium text-slate-300">Bot Configuration</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Live values from CONFIG sheet</p>
-    </div>
-    {% if config %}
-    <div class="divide-y divide-slate-800">
-      {% for key, value in config.items() %}
-      <div class="px-6 py-3 flex items-center justify-between">
-        <span class="text-xs text-slate-400 font-mono">{{ key }}</span>
-        <span class="text-sm text-white">{{ value }}</span>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="py-16 text-center text-slate-600">
-      <p class="text-sm">Config data loads once sheets.py is implemented.</p>
-    </div>
-    {% endif %}
-  </div>
-
 </div>
+
+<script>
+function val(id) { return document.getElementById(id).value; }
+
+function updateSlider(slider, valId, color) {
+  const min = +slider.min, max = +slider.max, v = +slider.value;
+  const pct = ((v - min) / (max - min) * 100).toFixed(1);
+  slider.style.background = `linear-gradient(to right,${color} 0%,${color} ${pct}%,#334155 ${pct}%,#334155 100%)`;
+  document.getElementById(valId).textContent = v + '%';
+}
+
+// Init slider backgrounds on load
+updateSlider(document.getElementById('redSlider'),   'redVal',   '#ef4444');
+updateSlider(document.getElementById('amberSlider'), 'amberVal', '#eab308');
+
+function showToast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `fixed top-5 right-5 z-50 px-5 py-3 rounded-xl text-sm font-medium shadow-lg ${ok ? 'bg-green-600' : 'bg-red-600'} text-white`;
+  setTimeout(() => { t.className = t.className + ' hidden'; }, 3000);
+}
+
+async function postConfig(payload) {
+  const r = await fetch('/settings/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function saveSection(section) {
+  try {
+    if (section === 'schedule') {
+      await postConfig({
+        morning_reminder_time: val('morning_reminder_time'),
+        second_reminder_time:  val('second_reminder_time'),
+        precut_reminder_time:  val('precut_reminder_time'),
+        checkin_cutoff_time:   val('checkin_cutoff_time'),
+        report_day:            val('report_day'),
+        report_time:           val('report_time'),
+      });
+    } else if (section === 'risk') {
+      await postConfig({
+        risk_red_threshold:   (parseInt(val('redSlider'))   / 100).toFixed(2),
+        risk_amber_threshold: (parseInt(val('amberSlider')) / 100).toFixed(2),
+        streak_concern_days:  val('streak_concern_days'),
+      });
+    } else if (section === 'data') {
+      await postConfig({ retention_weeks: val('retention_weeks') });
+    }
+    showToast('Saved successfully', true);
+  } catch(e) {
+    showToast('Save failed: ' + e.message, false);
+  }
+}
+
+async function triggerReport() {
+  try {
+    const r = await fetch('/api/report/run', { method: 'POST' });
+    showToast(r.ok ? 'Report triggered' : 'Not yet implemented', r.ok);
+  } catch(e) { showToast('Failed', false); }
+}
+
+async function purgeData() {
+  showToast('Purge not yet implemented', false);
+}
+</script>
 {% endblock %}

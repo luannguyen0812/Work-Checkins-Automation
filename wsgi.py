@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from admin.auth import ensure_default_admin
 from admin.api import app
 
