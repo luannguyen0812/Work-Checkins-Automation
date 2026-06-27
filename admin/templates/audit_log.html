@@ -9,7 +9,7 @@
       <h2 class="text-sm font-medium text-slate-300">Escalation &amp; Event Log</h2>
       <p class="text-xs text-slate-500 mt-0.5">{{ events|length }} records</p>
     </div>
-    <span class="text-xs text-yellow-600">Demo data — bot not yet connected</span>
+    {% if not events %}<span class="text-xs text-slate-500">No escalations logged yet</span>{% endif %}
   </div>
 
   {% if events %}

@@ -1,13 +1,28 @@
 from datetime import date, timedelta
 from datastore.models import RiskScore, CheckIn, Intern
-from utils.time_utils import edt_now
+from utils.time_utils import edt_now, scheduled_weekdays
 
 
-def _working_days_in_week(iso_week: int, year: int, as_of: date = None) -> list[date]:
+def _working_days_in_week(
+    iso_week: int,
+    year: int,
+    allowed_weekdays: set[int] = None,
+    as_of: date = None,
+) -> list[date]:
+    """Dates in the given ISO week that fall on the intern's scheduled weekdays.
+
+    allowed_weekdays is a set of ints (0=Mon … 6=Sun). Defaults to Mon–Fri so
+    weekday-only interns are scored over 5 days; weekend workers pass their own
+    set (which may include 5=Sat / 6=Sun) and are scored over up to 7 days.
+    """
+    if allowed_weekdays is None:
+        allowed_weekdays = {0, 1, 2, 3, 4}
     monday = date.fromisocalendar(year, iso_week, 1)
     days = []
-    for i in range(5):
+    for i in range(7):
         d = monday + timedelta(days=i)
+        if d.weekday() not in allowed_weekdays:
+            continue
         if as_of is None or d <= as_of:
             days.append(d)
     return days
@@ -44,11 +59,24 @@ def compute_risk_score(
     )
 
 
-def weekly_attendance_rate(checkins: list[CheckIn], intern_id: str, working_days: int) -> float:
-    if working_days == 0:
+def weekly_attendance_rate(checkins: list[CheckIn], intern_id: str, working_days) -> float:
+    """Fraction of the intern's scheduled days they checked in.
+
+    working_days may be a list of dates (preferred — only check-ins landing on
+    scheduled days count) or an int (legacy — total scheduled day count).
+    """
+    if isinstance(working_days, int):
+        if working_days == 0:
+            return 0.0
+        days_checked = len({c.date for c in checkins if c.intern_id == intern_id and c.validated})
+        return min(1.0, days_checked / working_days)
+
+    working_set = set(working_days)
+    if not working_set:
         return 0.0
-    days_checked = len({c.date for c in checkins if c.intern_id == intern_id and c.validated})
-    return min(1.0, days_checked / working_days)
+    checked = {c.date for c in checkins if c.intern_id == intern_id and c.validated}
+    days_checked = len(checked & working_set)
+    return min(1.0, days_checked / len(working_set))
 
 
 def rolling_attendance_rate(intern_id: str, weeks: int = 4) -> float:
@@ -117,7 +145,6 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
         return []
 
     now = edt_now().date()
-    working_days = _working_days_in_week(iso_week, year, as_of=now)
 
     # Pre-fetch 4 weeks of check-in data
     weeks_cache: dict[tuple, list[CheckIn]] = {}
@@ -137,8 +164,12 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
 
     scores = []
     for intern in active:
-        # WAR
-        war = weekly_attendance_rate(current_week_checkins, intern.intern_id, len(working_days))
+        # Each intern is scored only over the weekdays they're scheduled to work.
+        allowed = scheduled_weekdays(intern)
+        working_days = _working_days_in_week(iso_week, year, allowed, as_of=now)
+
+        # WAR — only check-ins on scheduled days count
+        war = weekly_attendance_rate(current_week_checkins, intern.intern_id, working_days)
 
         # RAR — using pre-fetched cache
         total_days = 0
@@ -147,18 +178,18 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
             ref_date = now - timedelta(weeks=w)
             ref_iso = ref_date.isocalendar()
             key = (ref_iso.week, ref_iso.year)
-            wd = _working_days_in_week(ref_iso.week, ref_iso.year, as_of=now)
+            wd = _working_days_in_week(ref_iso.week, ref_iso.year, allowed, as_of=now)
             checked = get_checked_dates(intern.intern_id, key)
             checked_days += len({d for d in wd if d in checked})
             total_days += len(wd)
         rar = checked_days / total_days if total_days > 0 else 0.0
 
-        # CAS — consecutive absences using cached data
+        # CAS — consecutive absences over scheduled days only
         cas = 0
         d = now - timedelta(days=1)
         cutoff = now - timedelta(weeks=4)
         while cas < 20 and d >= cutoff:
-            if d.weekday() >= 5:
+            if d.weekday() not in allowed:
                 d -= timedelta(days=1)
                 continue
             d_iso = d.isocalendar()

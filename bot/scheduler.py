@@ -15,31 +15,44 @@ _nudged_today: set[str] = set()
 _nudge_date: date | None = None
 
 
-def _time_to_cron(t: str) -> str:
-    """Convert 'HH:MM' to a Mon-Fri cron string."""
+TZ = "America/New_York"
+
+
+def _hm(t: str) -> tuple[int, int]:
+    """Parse 'HH:MM' into (hour, minute)."""
     h, m = t.split(":")
-    return f"{int(m)} {int(h)} * * 1-5"
+    return int(h), int(m)
 
 
 def register_jobs(bot) -> BackgroundScheduler:
     from datastore.sheets import get_config
     cfg = get_config()
 
-    scheduler = BackgroundScheduler(timezone="America/New_York")
+    scheduler = BackgroundScheduler(timezone=TZ)
+
+    # NOTE: day_of_week uses APScheduler day-name strings ('mon-fri'), NOT
+    # numeric crontab. CronTrigger.from_crontab does not remap crontab's
+    # 0=Sun/1=Mon numbering, so a numeric '1-5' is read as Tue–Sat — which
+    # wrongly fired reminders on Saturday and skipped Monday. Day names are
+    # unambiguous. Check-in reminders are weekday-only; weekend check-ins are
+    # still captured silently, just never nudged.
+    mh, mm = _hm(cfg.morning_reminder_time)
+    sh, sm = _hm(cfg.second_reminder_time)
+    ph, pm = _hm(cfg.precut_reminder_time)
 
     jobs = [
-        ("morning_reminder", _time_to_cron(cfg.morning_reminder_time), _send_morning_reminder),
-        ("second_reminder",  _time_to_cron(cfg.second_reminder_time),  _send_second_reminder),
-        ("precut_reminder",  _time_to_cron(cfg.precut_reminder_time),  _send_precut_reminder),
-        ("dm_nudge",         "*/30 8-22 * * 1-5",                      _send_dm_nudges),
-        ("weekly_report",    "30 9 * * 1",                             _generate_and_send_report),
-        ("data_retention",   "0 2 * * 0",                              _run_retention_cleanup),
+        ("morning_reminder", CronTrigger(day_of_week="mon-fri", hour=mh, minute=mm, timezone=TZ), _send_morning_reminder),
+        ("second_reminder",  CronTrigger(day_of_week="mon-fri", hour=sh, minute=sm, timezone=TZ), _send_second_reminder),
+        ("precut_reminder",  CronTrigger(day_of_week="mon-fri", hour=ph, minute=pm, timezone=TZ), _send_precut_reminder),
+        ("dm_nudge",         CronTrigger(day_of_week="mon-fri", hour="8-22", minute="*/30", timezone=TZ), _send_dm_nudges),
+        ("weekly_report",    CronTrigger(day_of_week="mon", hour=9, minute=30, timezone=TZ), _generate_and_send_report),
+        ("data_retention",   CronTrigger(day_of_week="sun", hour=2, minute=0, timezone=TZ), _run_retention_cleanup),
     ]
 
-    for job_id, cron, fn in jobs:
+    for job_id, trigger, fn in jobs:
         scheduler.add_job(
             fn,
-            CronTrigger.from_crontab(cron, timezone="America/New_York"),
+            trigger,
             id=job_id,
             replace_existing=True,
             kwargs={"bot": bot},

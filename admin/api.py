@@ -8,7 +8,7 @@ from admin.auth import get_user_by_id, get_user_by_username, get_all_users, crea
 from datastore import sheets
 from datastore.sheets import get_source_team_members
 from datastore.queries import compute_all_risk_scores
-from utils.time_utils import edt_now
+from utils.time_utils import edt_now, scheduled_weekdays
 
 AVATAR_COLORS = [
     "bg-blue-600", "bg-green-600", "bg-purple-600", "bg-orange-500",
@@ -47,11 +47,35 @@ def _now_str():
 def _week_labels_and_trend():
     now = edt_now()
     labels, data = [], []
+    try:
+        active_interns = [i for i in sheets.get_all_interns() if i.active]
+        intern_count = len(active_interns) or 1
+    except Exception:
+        active_interns = []
+        intern_count = 1
     for i in range(7, -1, -1):
         w = now - timedelta(weeks=i)
-        labels.append(f"Week {w.isocalendar().week}")
-        data.append(0)
+        iso = w.isocalendar()
+        labels.append(f"Wk {iso.week}")
+        if active_interns:
+            try:
+                ci = sheets.get_checkins_for_week(iso.week, iso.year)
+                validated = {c.intern_id for c in ci if c.validated}
+                rate = round(len(validated) / intern_count * 100)
+            except Exception:
+                rate = 0
+        else:
+            rate = 0
+        data.append(rate)
     return labels, data
+
+
+def _week_monday(week: int, year: int):
+    """Return the Monday date for a given ISO week + year."""
+    from datetime import date
+    jan4 = date(year, 1, 4)
+    iso_start = jan4 - timedelta(days=jan4.isoweekday() - 1)
+    return iso_start + timedelta(weeks=week - 1)
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -228,37 +252,67 @@ def risk_report():
 @login_required
 def weekly_data():
     now = edt_now()
-    week_labels, trend_data = _week_labels_and_trend()
+    current_iso = now.isocalendar()
 
-    monday = now - timedelta(days=now.weekday())
-    days = [monday + timedelta(days=i) for i in range(5)]
-    day_headers = [d.strftime("%a") for d in days]
+    try:
+        sel_week = int(request.args.get("week", current_iso.week))
+        sel_year = int(request.args.get("year", current_iso.year))
+    except (ValueError, TypeError):
+        sel_week, sel_year = current_iso.week, current_iso.year
 
-    week_checkins = sheets.get_checkins_for_week(now.isocalendar().week, now.year)
+    is_current = (sel_week == current_iso.week and sel_year == current_iso.year)
+
+    monday = _week_monday(sel_week, sel_year)
+    days = [monday + timedelta(days=i) for i in range(7)]
+    day_headers = [d.strftime("%a %b %d") for d in days]
+
+    prev_monday = monday - timedelta(weeks=1)
+    prev_iso = prev_monday.isocalendar()
+    next_monday = monday + timedelta(weeks=1)
+    next_iso = next_monday.isocalendar()
+    can_go_next = next_monday <= now.date()
+
+    week_checkins = sheets.get_checkins_for_week(sel_week, sel_year)
     checked_set = {(c.intern_id, c.date) for c in week_checkins if c.validated}
     active_interns = [i for i in sheets.get_all_interns() if i.active]
 
     heatmap = []
     for idx, intern in enumerate(active_interns):
+        allowed = scheduled_weekdays(intern)
         row_days = []
         for d in days:
-            if d.date() > now.date():
-                row_days.append(None)
+            if d.weekday() not in allowed:
+                row_days.append("na")          # not scheduled → hyphen, excluded from rate
+            elif is_current and d > now.date():
+                row_days.append(None)          # future scheduled day → pending
             else:
-                row_days.append((intern.intern_id, d.date()) in checked_set)
+                row_days.append((intern.intern_id, d) in checked_set)
+        present = sum(1 for v in row_days if v is True)
+        applicable = sum(1 for v in row_days if v is True or v is False)
+        rate = round(present / applicable * 100) if applicable else 0
         heatmap.append({
             "name": intern.full_name,
             "initials": "".join(p[0].upper() for p in intern.full_name.split()[:2]),
             "color": AVATAR_COLORS[idx % len(AVATAR_COLORS)],
             "days": row_days,
+            "rate": rate,
+            "scheduled_count": len(allowed),
         })
 
-    week_label = f"{monday.strftime('%b %d')} – {days[-1].strftime('%b %d, %Y')}"
+    week_label = f"Week {sel_week} · {monday.strftime('%b %d')} – {days[-1].strftime('%b %d, %Y')}"
+    week_labels, trend_data = _week_labels_and_trend()
+
     return render_template("weekly_data.html",
         active="weekly", now=_now_str(),
         week_labels=week_labels, trend_data=trend_data,
         heatmap=heatmap, day_headers=day_headers,
-        week_label=week_label, weekly_rows=[],
+        week_label=week_label, weekly_rows=[], demo=False,
+        is_current=is_current,
+        prev_week=prev_iso.week, prev_year=prev_iso.year,
+        next_week=next_iso.week, next_year=next_iso.year,
+        can_go_next=can_go_next,
+        sel_week=sel_week, sel_year=sel_year,
+        current_week=current_iso.week, current_year=current_iso.year,
     )
 
 
@@ -311,25 +365,22 @@ def remove_user(uid):
 @app.get("/audit-log")
 @login_required
 def audit_log():
-    today = edt_now()
-    def _d(offset=0): return (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-    events = [
-        {"ts": f"{_d()} 09:58", "type": "CHECK IN",    "badge": "checkin",    "actor": "System",  "desc": "31 interns checked in today by 09:58 AM"},
-        {"ts": f"{_d()} 09:30", "type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Reminder nudge sent to 12 interns who had not checked in"},
-        {"ts": f"{_d()} 08:00", "type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Daily check-in window opened at 08:00 EDT"},
-        {"ts": f"{_d(1)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Daily summary report generated and sent to admins"},
-        {"ts": f"{_d(1)} 12:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Check-in window closed — 35/43 checked in"},
-        {"ts": f"{_d(1)} 11:00","type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Second reminder sent to 8 interns still missing"},
-        {"ts": f"{_d(1)} 08:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Daily check-in window opened at 08:00 EDT"},
-        {"ts": f"{_d(4)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Weekly risk report generated — 4 RED, 8 AMBER"},
-        {"ts": f"{_d(4)} 12:00","type": "SCHEDULE",    "badge": "schedule",   "actor": "System",  "desc": "Friday check-in window closed — 38/43 checked in (88%)"},
-        {"ts": f"{_d(5)} 16:30","type": "THRESHOLD",   "badge": "threshold",  "actor": "Luan",    "desc": "Red risk threshold updated from 45% to 50%"},
-        {"ts": f"{_d(6)} 14:20","type": "EDIT",        "badge": "edit",       "actor": "Luan",    "desc": "Rolling window changed from 7d to 14d"},
-        {"ts": f"{_d(7)} 11:00","type": "REMINDER",    "badge": "reminder",   "actor": "Bot",     "desc": "Reminder nudge sent to 15 interns who had not checked in"},
-        {"ts": f"{_d(8)} 18:00","type": "REPORT",      "badge": "report",     "actor": "System",  "desc": "Daily summary: 37/43 checked in (86%)"},
-        {"ts": f"{_d(11)} 18:00","type":"REPORT",      "badge": "report",     "actor": "System",  "desc": "Weekly risk report generated — 5 RED, 9 AMBER"},
-        {"ts": f"{_d(14)} 09:10","type":"REGISTRATION","badge":"registration", "actor": "Luan",    "desc": "Bot added to intern Telegram group as admin"},
-    ]
+    try:
+        ss = sheets._get_spreadsheet()
+        ws = ss.worksheet("ESCALATIONS")
+        records = ws.get_all_records()
+        events = []
+        for r in records:
+            events.append({
+                "ts":    str(r.get("date", "") or r.get("timestamp", "")),
+                "type":  str(r.get("trigger", "EVENT")).upper(),
+                "badge": str(r.get("trigger", "event")).lower(),
+                "actor": str(r.get("action_taken", "System") or "System"),
+                "desc":  str(r.get("notes", "") or r.get("intern_id", "")),
+            })
+        events = list(reversed(events))
+    except Exception:
+        events = []
     return render_template("audit_log.html", active="audit", now=_now_str(), events=events)
 
 

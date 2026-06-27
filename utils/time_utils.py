@@ -94,6 +94,25 @@ def is_working_today(intern: "Intern", now_edt: datetime) -> bool:
     return _segment_for_weekday(segments, work_date.weekday()) is not None
 
 
+def scheduled_weekdays(intern: "Intern") -> set[int]:
+    """
+    Set of weekday ints (0=Mon … 6=Sun) the intern is scheduled to work.
+    Falls back to Mon–Fri when no schedule is stored, so attendance for
+    weekday-only interns is scored over 5 days and weekend workers over their
+    actual scheduled days (which may span all 7).
+    """
+    segments = _parse_schedule(intern)
+    if not segments:
+        return {0, 1, 2, 3, 4}
+    days: set[int] = set()
+    for seg in segments:
+        for day_name in seg.get("days", []):
+            wd = _DAY_MAP.get(day_name)
+            if wd is not None:
+                days.add(wd)
+    return days or {0, 1, 2, 3, 4}
+
+
 def is_late(intern_or_cutoff, now_edt: datetime) -> bool:
     """
     Per-intern: late if checked in more than LATE_GRACE_MINUTES after shift start.
