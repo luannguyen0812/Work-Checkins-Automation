@@ -8,7 +8,7 @@ from admin.auth import get_user_by_id, get_user_by_username, get_all_users, crea
 from datastore import sheets
 from datastore.sheets import get_source_team_members
 from datastore.queries import compute_all_risk_scores
-from utils.time_utils import edt_now, scheduled_weekdays
+from utils.time_utils import edt_now, scheduled_weekdays, is_us_public_holiday
 
 AVATAR_COLORS = [
     "bg-blue-600", "bg-green-600", "bg-purple-600", "bg-orange-500",
@@ -281,8 +281,8 @@ def weekly_data():
         allowed = scheduled_weekdays(intern)
         row_days = []
         for d in days:
-            if d.weekday() not in allowed:
-                row_days.append("na")          # not scheduled → hyphen, excluded from rate
+            if d.weekday() not in allowed or is_us_public_holiday(d):
+                row_days.append("na")          # not scheduled or holiday → hyphen, excluded from rate
             elif is_current and d > now.date():
                 row_days.append(None)          # future scheduled day → pending
             else:

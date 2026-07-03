@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from utils.logger import get_logger
-from utils.time_utils import edt_now, get_work_date, is_working_today, _parse_schedule, _segment_for_weekday
+from utils.time_utils import edt_now, get_work_date, is_working_today, is_us_public_holiday, _parse_schedule, _segment_for_weekday
 
 logger = get_logger(__name__)
 
@@ -79,6 +79,10 @@ def _send_morning_reminder(bot) -> None:
     from datastore.sheets import get_config
     from bot.templates import morning_reminder
     try:
+        today = edt_now().date()
+        if is_us_public_holiday(today):
+            logger.info("Skipping morning reminder — US public holiday", extra={"date": str(today)})
+            return
         cfg = get_config()
         if not cfg.group_chat_id:
             logger.warning("group_chat_id not set — skipping morning reminder")
@@ -94,6 +98,10 @@ def _send_second_reminder(bot) -> None:
     from datastore.sheets import get_config
     from bot.templates import second_reminder
     try:
+        today = edt_now().date()
+        if is_us_public_holiday(today):
+            logger.info("Skipping second reminder — US public holiday", extra={"date": str(today)})
+            return
         cfg = get_config()
         if not cfg.group_chat_id:
             return
@@ -107,10 +115,14 @@ def _send_precut_reminder(bot) -> None:
     from datastore.sheets import get_config
     from bot.templates import precut_reminder
     try:
+        today = edt_now().date()
+        if is_us_public_holiday(today):
+            logger.info("Skipping pre-cutoff reminder — US public holiday", extra={"date": str(today)})
+            return
         cfg = get_config()
         if not cfg.group_chat_id:
             return
-        text = precut_reminder(cfg.checkin_cutoff_time)
+        text = precut_reminder(cfg.checkin_cutoff_time, cfg.precut_reminder_time)
         _run_async(bot.send_message(chat_id=cfg.group_chat_id, text=text))
         logger.info("Pre-cutoff reminder sent")
     except Exception:
@@ -128,6 +140,10 @@ def _send_dm_nudges(bot) -> None:
     try:
         now = edt_now()
         today = now.date()
+
+        if is_us_public_holiday(today):
+            logger.info("Skipping DM nudges — US public holiday", extra={"date": str(today)})
+            return
 
         # Reset daily nudge tracking at midnight
         if _nudge_date != today:

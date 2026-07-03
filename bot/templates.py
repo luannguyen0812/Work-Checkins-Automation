@@ -13,9 +13,16 @@ def second_reminder() -> str:
     )
 
 
-def precut_reminder(cutoff_time: str = "17:00") -> str:
+def precut_reminder(cutoff_time: str = "17:00", precut_time: str | None = None) -> str:
+    if precut_time:
+        ch, cm = map(int, cutoff_time.split(":"))
+        ph, pm = map(int, precut_time.split(":"))
+        gap = (ch * 60 + cm) - (ph * 60 + pm)
+        time_label = f"{gap} minutes away" if gap > 0 else "coming up"
+    else:
+        time_label = "coming up"
     return (
-        f"⏰ Heads up — check-in cutoff is at {cutoff_time} EDT (15 minutes away).\n\n"
+        f"⏰ Heads up — check-in cutoff is at {cutoff_time} EDT ({time_label}).\n\n"
         f"If you haven't sent your check-in yet, please do so NOW to be marked present today."
     )
 

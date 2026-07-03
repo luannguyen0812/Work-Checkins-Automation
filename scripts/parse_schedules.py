@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BOT_DIR)
 os.environ.setdefault(
     "GOOGLE_SERVICE_ACCOUNT_JSON",

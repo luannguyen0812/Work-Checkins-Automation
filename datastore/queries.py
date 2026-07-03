@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 from datastore.models import RiskScore, CheckIn, Intern
-from utils.time_utils import edt_now, scheduled_weekdays
+from utils.time_utils import edt_now, scheduled_weekdays, is_us_public_holiday
 
 
 def _working_days_in_week(
@@ -14,6 +14,8 @@ def _working_days_in_week(
     allowed_weekdays is a set of ints (0=Mon … 6=Sun). Defaults to Mon–Fri so
     weekday-only interns are scored over 5 days; weekend workers pass their own
     set (which may include 5=Sat / 6=Sun) and are scored over up to 7 days.
+    US public holidays are excluded — nobody's expected to check in, so they
+    shouldn't count against attendance rate.
     """
     if allowed_weekdays is None:
         allowed_weekdays = {0, 1, 2, 3, 4}
@@ -22,6 +24,8 @@ def _working_days_in_week(
     for i in range(7):
         d = monday + timedelta(days=i)
         if d.weekday() not in allowed_weekdays:
+            continue
+        if is_us_public_holiday(d):
             continue
         if as_of is None or d <= as_of:
             days.append(d)
