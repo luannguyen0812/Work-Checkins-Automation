@@ -1,10 +1,10 @@
 import json
 import os
-import subprocess
 import difflib
 import time
 from datetime import date, datetime
 from typing import Optional
+import anthropic
 import gspread
 from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
@@ -70,8 +70,6 @@ def _invalidate_config_cache() -> None:
     _config_cache = None
 
 
-CLAUDE_BIN = "/usr/local/bin/claude"
-
 _SCHEDULE_PARSE_PROMPT = (
     'Parse this intern work schedule into JSON. Output ONLY a JSON array — no explanation.\n'
     'Each element: {{"days": [...], "start": "HH:MM", "end": "HH:MM"}}\n'
@@ -86,21 +84,24 @@ _SCHEDULE_PARSE_PROMPT = (
 
 
 def _parse_schedule_via_claude(raw: str) -> str:
-    """Call claude CLI to parse freeform schedule text. Returns a schedule_json string."""
+    """Call the Claude API to parse freeform schedule text. Returns a schedule_json
+    string, or "[]" if ANTHROPIC_API_KEY isn't set or the call fails for any reason —
+    self-registration should never break because schedule parsing is unavailable."""
     if not raw or not raw.strip():
+        return "[]"
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
         return "[]"
     prompt = _SCHEDULE_PARSE_PROMPT.format(raw=raw.replace('"', "'"))
     try:
-        result = subprocess.run(
-            [CLAUDE_BIN, "--print", "--output-format", "text"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=90,
+        client = anthropic.Anthropic(api_key=api_key)
+        model = os.environ.get("CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+        response = client.messages.create(
+            model=model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
         )
-        if result.returncode != 0:
-            return "[]"
-        out = result.stdout.strip()
+        out = response.content[0].text.strip()
         if out.startswith("```"):
             lines = out.split("\n")
             out = "\n".join(lines[1:])

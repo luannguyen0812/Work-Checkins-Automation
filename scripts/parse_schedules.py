@@ -14,8 +14,9 @@ Scheduled nightly via cron.
 
 import json
 import os
-import subprocess
 import sys
+
+import anthropic
 
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BOT_DIR)
@@ -30,7 +31,7 @@ os.environ.setdefault(
 
 from datastore.sheets import _get_spreadsheet  # noqa: E402
 
-CLAUDE_BIN = "/usr/local/bin/claude"
+CLAUDE_MODEL = os.environ.get("CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
 
 PARSE_PROMPT = (
     "You are a schedule parser. Convert each intern's freeform schedule text into structured JSON.\n\n"
@@ -54,20 +55,26 @@ PARSE_PROMPT = (
 
 
 def parse_with_claude(entries: list[tuple[str, str]]) -> dict:
-    """Batch-parse entries via Claude. Returns {name: schedule_list}."""
+    """Batch-parse entries via the Claude API. Returns {name: schedule_list}, or {}
+    if ANTHROPIC_API_KEY isn't set or the API call fails — callers treat a missing
+    entry the same as "no result"."""
     formatted = "\n".join(f'- {name}: "{sched}"' for name, sched in entries)
     prompt = PARSE_PROMPT.format(entries=formatted)
-    result = subprocess.run(
-        [CLAUDE_BIN, "--print", "--output-format", "text"],
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        print("Claude error:", result.stderr[:500])
-        sys.exit(1)
-    raw = result.stdout.strip()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        print("ANTHROPIC_API_KEY not set — skipping schedule parsing this run.")
+        return {}
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+    except Exception as e:
+        print(f"Claude API error: {e}")
+        return {}
     if raw.startswith("```"):
         lines = raw.split("\n")
         raw = "\n".join(lines[1:])
@@ -78,7 +85,7 @@ def parse_with_claude(entries: list[tuple[str, str]]) -> dict:
     except json.JSONDecodeError as e:
         print("JSON parse error:", e)
         print("Raw output:", raw[:1000])
-        sys.exit(1)
+        return {}
 
 
 def _ensure_col(ws, name: str) -> int:

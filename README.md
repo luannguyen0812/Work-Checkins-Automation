@@ -113,9 +113,15 @@ intern_checkin_bot/
 │   └── privacy.py            # Telegram-safe name scrubbing
 │
 ├── deploy/
-│   ├── setup.sh              # VPS provisioning script
+│   ├── setup.sh              # VPS provisioning script (Path A — sudo)
 │   ├── intern-checkin-bot.service    # systemd unit
-│   └── intern-checkin-dashboard.service
+│   ├── intern-checkin-dashboard.service
+│   ├── intern-checkin-parseschedules.service
+│   ├── intern-checkin-parseschedules.timer
+│   └── vps/                  # Path B — no-sudo deployment (see VPS Deployment below)
+│       ├── start_bot.sh / start_dashboard.sh
+│       ├── watchdog_bot.sh / watchdog_dashboard.sh
+│       └── rotate_logs.sh    # logrotate substitute, no root needed
 │
 ├── docs/
 │   ├── ADMIN_GUIDE.md        # Quick start + API endpoint reference
@@ -318,19 +324,54 @@ These were added after running the bot live against a 43-person cohort and obser
 - **Attendance counts actual check-ins over stale schedules** — if an intern's stored `schedule_json` doesn't yet reflect a real change (new hire, shift swap), a genuine check-in on an "unscheduled" day still counts as presence rather than being silently excluded from their attendance rate.
 - **Structured logging on every check-in decision** — accepted, rejected (wrong chat, unrecognised user, out-of-range date, duplicate, already checked in today), and validator misses are all logged with the Telegram user ID, username, and message text, making it possible to reconstruct exactly why any given message was or wasn't counted.
 - **Backfill scripts for real incidents** — `scripts/backfill_checkins.py` and `scripts/backfill_2026_07_08.py` document two actual production incidents (bot lacked group admin rights on day one; a validator regex gap missed "online 11-2pm"-style multi-digit time ranges) and the exact manual correction applied, rather than silently patching the sheet by hand.
+- **Schedule parsing via the Claude API, not a CLI subprocess** — both `datastore/sheets.py` (self-registration) and `scripts/parse_schedules.py` (nightly Team Members sync) originally shelled out to a local Claude Code CLI binary to parse freeform schedule text into structured JSON. That only worked on a machine with Claude Code installed and authenticated — it silently degraded to `"[]"`/`{}` on a server without it, and in one path (`parse_schedules.py`) would crash uncaught rather than degrade. Both now call the `anthropic` SDK directly with `ANTHROPIC_API_KEY`, matching the pattern already used for the weekly report narrative — portable to any server, and both paths degrade gracefully (skip parsing, log why) rather than crash if the key isn't set.
 
 ---
 
 ## VPS Deployment
 
+Two deployment paths depending on what access you have on the target server.
+
+### Path A — you have sudo
+
 1. Copy `secrets/service-account.json` to the server manually (never via git)
 2. Copy `.env` to the server and update all paths
-3. Run `deploy/setup.sh` (installs deps, creates systemd units, enables services)
-4. Two systemd services run independently:
+3. Run `deploy/setup.sh` (installs deps, creates systemd units + timer, enables services, configures nginx)
+4. Three systemd services run independently:
    - `intern-checkin-bot.service` — the Telegram bot + scheduler
    - `intern-checkin-dashboard.service` — Gunicorn Flask app
+   - `intern-checkin-parseschedules.timer` — nightly schedule sync at 8 PM Eastern
 
 > **Before deploy:** Set `SECRET_KEY` in `.env` to a long random string (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`)
+
+### Path B — restricted account, no sudo (e.g. a shared box you don't administer)
+
+Scripts in `deploy/vps/` implement the same persistence guarantees without any root access — no `apt install`, no `/etc/systemd/system`, no nginx/certbot. Used in production against a shared VPS also running an unrelated mail server stack, where the deploy account was intentionally scoped to a single directory with no sudo.
+
+1. `rsync`/`scp` the repo to the server directly — skip git entirely so no credentials need to live on a box you don't fully control:
+   ```bash
+   rsync -avz --exclude='.venv' --exclude='__pycache__' --exclude='logs/*' \
+     --exclude='.git' --exclude='.env' --exclude='secrets/' --exclude='admin/users.json' \
+     ./ user@server:/path/to/app/
+   ```
+2. Build the venv on the server (`python3.12 -m venv .venv` — check whatever Python 3.x is actually available; nothing here requires 3.13 specifically) and `pip install -r requirements.txt`
+3. `scp` `.env`, `secrets/service-account.json`, and `admin/users.json` over separately, `chmod 600` all three
+4. In the server's `.env`, set `FLASK_ENABLED=false` — `main.py` otherwise starts its own embedded dev Flask server on the same port the standalone `gunicorn` dashboard needs, and the two collide
+5. Run the dashboard via `deploy/vps/start_dashboard.sh` (nohup + gunicorn, bound to `127.0.0.1` only — reach it via an SSH tunnel: `ssh -L 5051:127.0.0.1:5050 user@server`, then browse `localhost:5051`. No public port, no nginx, no TLS needed.)
+6. Run the bot via `deploy/vps/start_bot.sh`
+7. Install the crontab for auto-restart-on-crash and reboot persistence, with `CRON_TZ` pinned so scheduled times are correct regardless of the server's own system timezone:
+   ```
+   CRON_TZ=America/New_York
+   @reboot /path/to/app/deploy/vps/start_dashboard.sh
+   */5 * * * * /path/to/app/deploy/vps/watchdog_dashboard.sh
+   @reboot /path/to/app/deploy/vps/start_bot.sh
+   */5 * * * * /path/to/app/deploy/vps/watchdog_bot.sh
+   0 20 * * * /path/to/app/.venv/bin/python3 /path/to/app/scripts/parse_schedules.py >> /path/to/app/logs/parseschedules.log 2>&1
+   0 3 * * 0 /path/to/app/deploy/vps/rotate_logs.sh >> /path/to/app/logs/rotate.log 2>&1
+   ```
+8. **Cutting over from an already-running instance elsewhere** (e.g. a local machine): Telegram only allows one active poller per bot token. Stop the old instance first, confirm no process is left running, *then* start the new one — starting both even briefly produces `telegram.error.Conflict` and can duplicate or drop messages. The bot's own catch-up-reminder logic (see Bot Behaviour above) checks *today's log file on that machine* — a fresh server has no record that an old instance already sent today's reminder, so if cutting over after the morning reminder window has already fired elsewhere, manually seed today's dated log file with a matching `"Morning reminder sent"` JSON line first, or you'll get a duplicate reminder in the live group.
+
+`deploy/vps/rotate_logs.sh` handles log rotation with no `logrotate` binary available: `gunicorn`'s access/error logs are rotated via `mv` + `SIGUSR1` (gunicorn reopens them cleanly); the raw `nohup` stdout/stderr redirects are rotated via copy-then-truncate-in-place, since renaming a file out from under a process holding an open write handle to it doesn't actually stop that process writing to the old (now unlinked-from-that-name) inode; and the app's own dated `bot_YYYY-MM-DD.log` files are never touched if still open (checked via `/proc/<pid>/fd`, not just filename/date), since `utils/logger.py` opens that file once at process startup and keeps writing to it even across midnight rather than rotating automatically.
 
 ---
 
