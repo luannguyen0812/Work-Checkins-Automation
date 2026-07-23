@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync intern schedules from Team Members sheet into ROSTER
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/intern-checkin-bot
+EnvironmentFile=/opt/intern-checkin-bot/.env
+ExecStart=/opt/intern-checkin-bot/.venv/bin/python3 scripts/parse_schedules.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=intern-checkin-parseschedules

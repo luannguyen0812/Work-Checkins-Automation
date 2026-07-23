@@ -1,0 +1,11 @@
+[Unit]
+Description=Run intern schedule sync daily at 8 PM Eastern
+
+[Timer]
+# Explicit IANA timezone suffix — fires at 20:00 America/New_York regardless
+# of the VPS's own system timezone (systemd >= 239).
+OnCalendar=*-*-* 20:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

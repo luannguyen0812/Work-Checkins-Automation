@@ -8,8 +8,8 @@ apt update && apt upgrade -y
 apt install -y git nginx python3.13 python3.13-venv certbot python3-certbot-nginx
 
 echo "=== 2. App directory ==="
-mkdir -p /opt/intern-checkin-bot
-chown ubuntu:ubuntu /opt/intern-checkin-bot
+mkdir -p /opt/intern-checkin-bot/secrets
+chown -R ubuntu:ubuntu /opt/intern-checkin-bot
 
 echo "=== 3. Clone repo ==="
 # Replace with your actual git remote once you push
@@ -22,11 +22,12 @@ python3.13 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 
-echo "=== 5. .env file ==="
-echo "TODO: copy your .env to /opt/intern-checkin-bot/.env"
+echo "=== 5. .env and secrets ==="
+echo "TODO: copy these gitignored files from your Mac before continuing:"
 echo "      scp .env ubuntu@YOUR_VPS_IP:/opt/intern-checkin-bot/.env"
-echo "      scp /path/to/service-account.json ubuntu@YOUR_VPS_IP:/opt/intern-checkin-bot/service-account.json"
-echo "      Then update GOOGLE_SERVICE_ACCOUNT_JSON in .env to /opt/intern-checkin-bot/service-account.json"
+echo "      scp secrets/service-account.json ubuntu@YOUR_VPS_IP:/opt/intern-checkin-bot/secrets/service-account.json"
+echo "      scp admin/users.json ubuntu@YOUR_VPS_IP:/opt/intern-checkin-bot/admin/users.json   # optional — a default admin is created if skipped"
+echo "      Then update GOOGLE_SERVICE_ACCOUNT_JSON in .env to /opt/intern-checkin-bot/secrets/service-account.json"
 
 echo "=== 6. Logs directory ==="
 mkdir -p /opt/intern-checkin-bot/logs
@@ -35,9 +36,11 @@ chown ubuntu:ubuntu /opt/intern-checkin-bot/logs
 echo "=== 7. Systemd services ==="
 cp /opt/intern-checkin-bot/deploy/intern-checkin-bot.service /etc/systemd/system/
 cp /opt/intern-checkin-bot/deploy/intern-checkin-dashboard.service /etc/systemd/system/
+cp /opt/intern-checkin-bot/deploy/intern-checkin-parseschedules.service /etc/systemd/system/
+cp /opt/intern-checkin-bot/deploy/intern-checkin-parseschedules.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable intern-checkin-bot intern-checkin-dashboard
-systemctl start intern-checkin-bot intern-checkin-dashboard
+systemctl enable intern-checkin-bot intern-checkin-dashboard intern-checkin-parseschedules.timer
+systemctl start intern-checkin-bot intern-checkin-dashboard intern-checkin-parseschedules.timer
 
 echo "=== 8. Nginx ==="
 cp /opt/intern-checkin-bot/deploy/nginx.conf /etc/nginx/sites-available/intern-checkin
@@ -52,4 +55,5 @@ echo ""
 echo "=== Done! Check status with: ==="
 echo "  systemctl status intern-checkin-bot"
 echo "  systemctl status intern-checkin-dashboard"
+echo "  systemctl list-timers intern-checkin-parseschedules.timer"
 echo "  journalctl -u intern-checkin-bot -f"
