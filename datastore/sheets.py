@@ -1,6 +1,7 @@
 import json
 import os
 import difflib
+import subprocess
 import time
 from datetime import date, datetime
 from typing import Optional
@@ -83,32 +84,56 @@ _SCHEDULE_PARSE_PROMPT = (
 )
 
 
+CLAUDE_BIN = "/usr/local/bin/claude"
+
+
+def _strip_code_fence(out: str) -> str:
+    if out.startswith("```"):
+        lines = out.split("\n")
+        out = "\n".join(lines[1:])
+        if out.endswith("```"):
+            out = out[: out.rfind("```")]
+    return out.strip()
+
+
 def _parse_schedule_via_claude(raw: str) -> str:
-    """Call the Claude API to parse freeform schedule text. Returns a schedule_json
-    string, or "[]" if ANTHROPIC_API_KEY isn't set or the call fails for any reason —
-    self-registration should never break because schedule parsing is unavailable."""
+    """Parse freeform schedule text into a schedule_json string.
+
+    Prefers the local Claude Code CLI when present (uses your existing
+    subscription, no per-call API billing) -- the normal case on a dev
+    machine. Falls back to the Claude API via ANTHROPIC_API_KEY when the CLI
+    isn't installed (e.g. a server). Returns "[]" if neither is available or
+    the call fails for any reason -- self-registration should never break
+    because schedule parsing is unavailable."""
     if not raw or not raw.strip():
-        return "[]"
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
         return "[]"
     prompt = _SCHEDULE_PARSE_PROMPT.format(raw=raw.replace('"', "'"))
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        model = os.environ.get("CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
-        response = client.messages.create(
-            model=model,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        out = response.content[0].text.strip()
-        if out.startswith("```"):
-            lines = out.split("\n")
-            out = "\n".join(lines[1:])
-            if out.endswith("```"):
-                out = out[: out.rfind("```")]
+        if os.path.exists(CLAUDE_BIN):
+            result = subprocess.run(
+                [CLAUDE_BIN, "--print", "--output-format", "text"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            if result.returncode != 0:
+                return "[]"
+            out = _strip_code_fence(result.stdout.strip())
+        else:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                return "[]"
+            client = anthropic.Anthropic(api_key=api_key)
+            model = os.environ.get("CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+            response = client.messages.create(
+                model=model,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            out = _strip_code_fence(response.content[0].text.strip())
         json.loads(out)  # validate — raises if bad
-        return out.strip()
+        return out
     except Exception:
         return "[]"
 

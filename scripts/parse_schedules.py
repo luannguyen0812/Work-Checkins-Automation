@@ -14,6 +14,7 @@ Scheduled nightly via cron.
 
 import json
 import os
+import subprocess
 import sys
 
 import anthropic
@@ -31,6 +32,7 @@ os.environ.setdefault(
 
 from datastore.sheets import _get_spreadsheet  # noqa: E402
 
+CLAUDE_BIN = "/usr/local/bin/claude"
 CLAUDE_MODEL = os.environ.get("CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
 
 PARSE_PROMPT = (
@@ -55,26 +57,46 @@ PARSE_PROMPT = (
 
 
 def parse_with_claude(entries: list[tuple[str, str]]) -> dict:
-    """Batch-parse entries via the Claude API. Returns {name: schedule_list}, or {}
-    if ANTHROPIC_API_KEY isn't set or the API call fails — callers treat a missing
+    """Batch-parse entries into {name: schedule_list}.
+
+    Prefers the local Claude Code CLI when present (uses your existing
+    subscription, no per-call API billing) -- the normal case running this
+    from a dev machine via cron/launchd. Falls back to the Claude API via
+    ANTHROPIC_API_KEY when the CLI isn't installed (e.g. a server). Returns
+    {} if neither is available or the call fails -- callers treat a missing
     entry the same as "no result"."""
     formatted = "\n".join(f'- {name}: "{sched}"' for name, sched in entries)
     prompt = PARSE_PROMPT.format(entries=formatted)
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        print("ANTHROPIC_API_KEY not set — skipping schedule parsing this run.")
-        return {}
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
+
+    if os.path.exists(CLAUDE_BIN):
+        result = subprocess.run(
+            [CLAUDE_BIN, "--print", "--output-format", "text"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-        raw = response.content[0].text.strip()
-    except Exception as e:
-        print(f"Claude API error: {e}")
-        return {}
+        if result.returncode != 0:
+            print("Claude CLI error:", result.stderr[:500])
+            return {}
+        raw = result.stdout.strip()
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            print("Claude CLI not found and ANTHROPIC_API_KEY not set — skipping schedule parsing this run.")
+            return {}
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+        except Exception as e:
+            print(f"Claude API error: {e}")
+            return {}
+
     if raw.startswith("```"):
         lines = raw.split("\n")
         raw = "\n".join(lines[1:])
