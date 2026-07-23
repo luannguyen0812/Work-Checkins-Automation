@@ -4,6 +4,7 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from datastore.models import RiskScore, CheckIn
+from utils.time_utils import is_us_public_holiday, scheduled_weekdays
 
 COLOR_GREEN  = "00B050"
 COLOR_AMBER  = "FFC000"
@@ -62,15 +63,16 @@ def report_filename(iso_week: int, year: int, gen_date: date) -> str:
 
 def _week_date_range(iso_week: int, year: int) -> tuple[date, date]:
     monday = date.fromisocalendar(year, iso_week, 1)
-    friday = monday + timedelta(days=4)
-    return monday, friday
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
 
 
 def _load_data(iso_week: int, year: int):
     from datastore import sheets
     from datastore.queries import compute_all_risk_scores
+    _, week_end = _week_date_range(iso_week, year)
     checkins = sheets.get_checkins_for_week(iso_week, year)
-    scores = compute_all_risk_scores(iso_week, year)
+    scores = compute_all_risk_scores(iso_week, year, as_of=week_end)
     return checkins, scores
 
 
@@ -82,19 +84,19 @@ def _build_executive_summary(wb, iso_week: int, year: int) -> None:
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 20
 
-    monday, friday = _week_date_range(iso_week, year)
+    monday, sunday = _week_date_range(iso_week, year)
     checkins, scores = _load_data(iso_week, year)
 
     total = len(scores)
     avg_rate = round(sum(s.war for s in scores) / total * 100, 1) if scores else 0.0
-    green = [s for s in scores if s.risk_band == "GREEN"]
-    amber = [s for s in scores if s.risk_band == "AMBER"]
-    red   = [s for s in scores if s.risk_band == "RED"]
+    green = [s for s in scores if s.war >= 0.85]
+    amber = [s for s in scores if 0.70 <= s.war < 0.85]
+    red = [s for s in scores if s.war < 0.70]
 
     # Title block
     ws.merge_cells("A1:D1")
     title = ws["A1"]
-    title.value = f"Intern Attendance Report — Week {iso_week} ({monday.strftime('%b %d')} – {friday.strftime('%b %d, %Y')})"
+    title.value = f"Intern Attendance Report — Week {iso_week} ({monday.strftime('%b %d')} – {sunday.strftime('%b %d, %Y')})"
     title.font = Font(bold=True, size=14, color="FFFFFF")
     title.fill = FILL_HEADER
     title.alignment = Alignment(horizontal="center")
@@ -120,22 +122,23 @@ def _build_executive_summary(wb, iso_week: int, year: int) -> None:
 
     ws.row_dimensions[3].height = 30
 
-    # Top 5 at-risk table
-    ws.cell(row=5, column=1, value="Top At-Risk Interns").font = Font(bold=True, size=12)
-    headers = ["Name", "Att. Rate", "Streak", "Risk", "Action"]
+    # Weekly attendance watchlist. Longer-term composite risk stays in Risk Scores.
+    ws.cell(row=5, column=1, value="Weekly Attendance Watchlist").font = Font(bold=True, size=12)
+    headers = ["Name", "Attendance", "Streak", "Attendance Band", "Action"]
     for col, h in enumerate(headers, start=1):
         _hdr(ws, 6, col, h, fill=FILL_HEADER, font=FONT_HEADER)
 
-    at_risk = sorted(scores, key=lambda s: s.risk_score)[:5]
-    for row_offset, s in enumerate(at_risk, start=7):
-        action = "Schedule 1:1" if s.risk_band == "RED" else "Monitor"
-        vals = [s.full_name, f"{s.war*100:.0f}%", str(s.cas), s.risk_band, action]
+    watchlist = sorted(red + amber, key=lambda s: (s.war, s.full_name))[:5]
+    for row_offset, s in enumerate(watchlist, start=7):
+        band = "GREEN" if s.war >= 0.85 else ("AMBER" if s.war >= 0.70 else "RED")
+        action = "Follow up" if band == "RED" else "Monitor"
+        vals = [s.full_name, f"{s.war*100:.0f}%", str(s.cas), band, action]
         for col, v in enumerate(vals, start=1):
             cell = ws.cell(row=row_offset, column=col, value=v)
             cell.border = BORDER
             if col == 4:
-                cell.fill = _band_fill(s.risk_band)
-                if s.risk_band != "AMBER":
+                cell.fill = _band_fill(band)
+                if band != "AMBER":
                     cell.font = Font(color="FFFFFF")
 
     # Narrative
@@ -154,21 +157,21 @@ def _build_executive_summary(wb, iso_week: int, year: int) -> None:
 
 def _get_narrative(iso_week: int, year: int, scores: list[RiskScore]) -> str:
     import os
-    monday, friday = _week_date_range(iso_week, year)
+    monday, sunday = _week_date_range(iso_week, year)
     total = len(scores)
     avg_rate = round(sum(s.war for s in scores) / total * 100, 1) if scores else 0.0
-    red = [s for s in scores if s.risk_band == "RED"]
-    amber = [s for s in scores if s.risk_band == "AMBER"]
-    green = [s for s in scores if s.risk_band == "GREEN"]
+    red = [s for s in scores if s.war < 0.70]
+    amber = [s for s in scores if 0.70 <= s.war < 0.85]
+    green = [s for s in scores if s.war >= 0.85]
     red_table = "\n".join(f"  {s.full_name}: {s.war*100:.0f}% attendance, {s.cas} day streak" for s in red[:5])
-    trend_notes = f"{len(red)} interns flagged RED; {len(amber)} AMBER this week"
+    trend_notes = f"{len(red)} interns below 70% weekly attendance; {len(amber)} between 70% and 85%"
 
     if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         try:
             from report.summary import generate_narrative
             return generate_narrative(
                 week_number=iso_week,
-                date_range=f"{monday.strftime('%b %d')} – {friday.strftime('%b %d, %Y')}",
+                date_range=f"{monday.strftime('%b %d')} – {sunday.strftime('%b %d, %Y')}",
                 total_interns=total,
                 avg_rate=avg_rate,
                 green_count=len(green),
@@ -182,13 +185,13 @@ def _get_narrative(iso_week: int, year: int, scores: list[RiskScore]) -> str:
 
     # Fallback plain narrative
     lines = [
-        f"Week {iso_week} summary ({monday.strftime('%b %d')} – {friday.strftime('%b %d, %Y')}).",
+        f"Week {iso_week} summary ({monday.strftime('%b %d')} – {sunday.strftime('%b %d, %Y')}).",
         f"Cohort average attendance: {avg_rate}%. {total} interns tracked.",
-        f"Risk: {len(green)} GREEN, {len(amber)} AMBER, {len(red)} RED.",
+        f"Weekly attendance: {len(green)} GREEN, {len(amber)} AMBER, {len(red)} RED.",
     ]
     if red:
         names = ", ".join(s.full_name for s in red[:3])
-        lines.append(f"RED interns requiring 1:1: {names}{'...' if len(red) > 3 else ''}.")
+        lines.append(f"RED attendance interns requiring follow-up: {names}{'...' if len(red) > 3 else ''}.")
     if amber:
         lines.append(f"{len(amber)} AMBER interns should be monitored closely next week.")
     return " ".join(lines)
@@ -224,8 +227,30 @@ def _build_raw_checkins(wb, iso_week: int, year: int) -> None:
 
 
 def _working_days(iso_week: int, year: int) -> list[date]:
+    """All 7 calendar days of the ISO week. Which of these count for a given
+    intern depends on their own schedule — see scheduled_weekdays()."""
     monday = date.fromisocalendar(year, iso_week, 1)
-    return [monday + timedelta(days=i) for i in range(5)]
+    return [monday + timedelta(days=i) for i in range(7)]
+
+
+def _scheduled_days_for_intern(intern, days: list[date]) -> list[date]:
+    allowed = scheduled_weekdays(intern)
+    return [
+        d
+        for d in days
+        if d.weekday() in allowed
+        and intern.start_date <= d <= intern.end_date
+        and not is_us_public_holiday(d)
+    ]
+
+
+def _attendance_days_for_intern(intern, days: list[date], checked: set[date]) -> list[date]:
+    scheduled = set(_scheduled_days_for_intern(intern, days))
+    valid_checked = {
+        d for d in checked
+        if d in days and intern.start_date <= d <= intern.end_date
+    }
+    return sorted(scheduled | valid_checked)
 
 
 def _build_attendance_rates(wb, iso_week: int, year: int) -> None:
@@ -246,19 +271,26 @@ def _build_attendance_rates(wb, iso_week: int, year: int) -> None:
 
     checked_map: dict[str, set[date]] = {}
     for c in checkins:
-        checked_map.setdefault(c.intern_id, set()).add(c.date)
+        if c.validated:
+            checked_map.setdefault(c.intern_id, set()).add(c.date)
 
     rows_written = 0
     for row_offset, intern in enumerate(sorted(interns, key=lambda i: i.full_name), start=2):
         checked = checked_map.get(intern.intern_id, set())
-        rate = len(checked) / len(days) * 100 if days else 0
+        intern_days = _attendance_days_for_intern(intern, days, checked)
+        intern_day_set = set(intern_days)
+        rate = len(checked & set(intern_days)) / len(intern_days) * 100 if intern_days else 0
         band = "GREEN" if rate >= 85 else ("AMBER" if rate >= 70 else "RED")
 
         ws.cell(row=row_offset, column=1, value=intern.full_name).border = BORDER
         for col_offset, d in enumerate(days, start=2):
-            cell = ws.cell(row=row_offset, column=col_offset, value="✅" if d in checked else "❌")
+            if d not in intern_day_set:
+                cell = ws.cell(row=row_offset, column=col_offset, value="—")
+                cell.fill = FILL_GREY
+            else:
+                cell = ws.cell(row=row_offset, column=col_offset, value="✅" if d in checked else "❌")
+                cell.fill = FILL_GREEN if d in checked else FILL_RED
             cell.alignment = Alignment(horizontal="center")
-            cell.fill = FILL_GREEN if d in checked else FILL_RED
             cell.border = BORDER
 
         rate_cell = ws.cell(row=row_offset, column=len(days) + 2, value=round(rate, 1))
@@ -307,8 +339,8 @@ def _build_trend_lines(wb, iso_week: int, year: int) -> None:
     for row_offset, intern in enumerate(sorted(interns, key=lambda i: i.full_name), start=2):
         ws.cell(row=row_offset, column=1, value=intern.full_name).border = BORDER
         for col_offset, (w, y) in enumerate(week_refs, start=2):
-            wd = _working_days(w, y)
             checked = {c.date for c in week_data[(w, y)] if c.intern_id == intern.intern_id and c.validated}
+            wd = _attendance_days_for_intern(intern, _working_days(w, y), checked)
             rate = round(len({d for d in wd if d in checked}) / len(wd) * 100, 1) if wd else 0
             cell = ws.cell(row=row_offset, column=col_offset, value=rate)
             cell.border = BORDER
@@ -317,12 +349,14 @@ def _build_trend_lines(wb, iso_week: int, year: int) -> None:
 
 def _build_heatmap(wb, iso_week: int, year: int) -> None:
     from datastore import sheets
+    from utils.time_utils import edt_now
     ws = wb.create_sheet("Heatmap")
 
     checkins = sheets.get_checkins_for_week(iso_week, year)
     interns = [i for i in sheets.get_all_interns() if i.active]
     days = _working_days(iso_week, year)
-    today = date.today()
+    _, week_end = _week_date_range(iso_week, year)
+    today = min(edt_now().date(), week_end)
 
     headers = ["Intern"] + [d.strftime("%a %m/%d") for d in days]
     for col, h in enumerate(headers, start=1):
@@ -333,14 +367,18 @@ def _build_heatmap(wb, iso_week: int, year: int) -> None:
     late_map: dict[tuple, bool] = {(c.intern_id, c.date): c.late for c in checkins}
     checked_map: dict[str, set[date]] = {}
     for c in checkins:
-        checked_map.setdefault(c.intern_id, set()).add(c.date)
+        if c.validated:
+            checked_map.setdefault(c.intern_id, set()).add(c.date)
 
     sorted_interns = sorted(interns, key=lambda i: len(checked_map.get(i.intern_id, set())))
     for row_offset, intern in enumerate(sorted_interns, start=2):
         ws.cell(row=row_offset, column=1, value=intern.full_name).border = BORDER
         checked = checked_map.get(intern.intern_id, set())
+        intern_day_set = set(_attendance_days_for_intern(intern, days, checked))
         for col_offset, d in enumerate(days, start=2):
-            if d > today:
+            if d not in intern_day_set:
+                symbol, fill = "—", FILL_GREY
+            elif d > today:
                 symbol, fill = "—", FILL_GREY
             elif d in checked:
                 late = late_map.get((intern.intern_id, d), False)
@@ -356,14 +394,16 @@ def _build_heatmap(wb, iso_week: int, year: int) -> None:
 def _build_streaks(wb, iso_week: int, year: int) -> None:
     from datastore import sheets
     from datastore.queries import compute_all_risk_scores
+    from utils.time_utils import edt_now
     ws = wb.create_sheet("Streaks & Gaps")
 
     interns = [i for i in sheets.get_all_interns() if i.active]
-    scores_map = {s.intern_id: s for s in compute_all_risk_scores(iso_week, year)}
+    _, week_end = _week_date_range(iso_week, year)
+    scores_map = {s.intern_id: s for s in compute_all_risk_scores(iso_week, year, as_of=week_end)}
     checkins = sheets.get_checkins_for_week(iso_week, year)
     days = _working_days(iso_week, year)
 
-    headers = ["Intern", "Days Present", "Days Absent", "Current Absence Streak", "Mon", "Tue", "Wed", "Thu", "Fri"]
+    headers = ["Intern", "Days Present", "Days Absent", "Current Absence Streak"] + [d.strftime("%a %m/%d") for d in days]
     for col, h in enumerate(headers, start=1):
         _hdr(ws, 1, col, h, fill=FILL_HEADER, font=FONT_HEADER)
         ws.column_dimensions[get_column_letter(col)].width = 16
@@ -371,12 +411,15 @@ def _build_streaks(wb, iso_week: int, year: int) -> None:
 
     checked_map: dict[str, set[date]] = {}
     for c in checkins:
-        checked_map.setdefault(c.intern_id, set()).add(c.date)
+        if c.validated:
+            checked_map.setdefault(c.intern_id, set()).add(c.date)
 
     for row_offset, intern in enumerate(sorted(interns, key=lambda i: i.full_name), start=2):
         checked = checked_map.get(intern.intern_id, set())
-        present = len({d for d in days if d in checked})
-        absent = len(days) - present
+        intern_days = _attendance_days_for_intern(intern, days, checked)
+        intern_day_set = set(intern_days)
+        present = len({d for d in intern_days if d in checked})
+        absent = len(intern_days) - present
         cas = scores_map.get(intern.intern_id).cas if intern.intern_id in scores_map else 0
 
         row_vals = [intern.full_name, present, absent, cas]
@@ -387,9 +430,11 @@ def _build_streaks(wb, iso_week: int, year: int) -> None:
                 cell.fill = FILL_RED
                 cell.font = Font(bold=True, color="FFFFFF")
 
-        today = date.today()
+        today = min(edt_now().date(), week_end)
         for col_offset, d in enumerate(days, start=5):
-            if d > today:
+            if d not in intern_day_set:
+                val, fill = "—", FILL_GREY
+            elif d > today:
                 val, fill = "—", FILL_GREY
             elif d in checked:
                 val, fill = "✅", FILL_GREEN
@@ -406,7 +451,8 @@ def _build_risk_scores(wb, iso_week: int, year: int) -> None:
     from report.charts import add_risk_scatter_chart
     ws = wb.create_sheet("Risk Scores")
 
-    scores = sorted(compute_all_risk_scores(iso_week, year), key=lambda s: s.risk_score)
+    _, week_end = _week_date_range(iso_week, year)
+    scores = sorted(compute_all_risk_scores(iso_week, year, as_of=week_end), key=lambda s: s.risk_score)
 
     headers = ["Intern", "WAR %", "RAR %", "CAS", "LCR %", "Risk Score", "Band"]
     for col, h in enumerate(headers, start=1):

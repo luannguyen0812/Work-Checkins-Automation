@@ -114,14 +114,31 @@ def main():
         if name:
             tm_schedule[name] = raw
 
-    # Read ROSTER and ensure both columns exist
+    # Build a normalised set of all Team Members names for membership checks
+    tm_names_normalised = {_normalize(n) for n in tm_schedule}
+
+    # Read ROSTER and ensure required columns exist
     roster_ws = ss.worksheet("ROSTER")
     json_col = _ensure_col(roster_ws, "schedule_json")
     raw_col = _ensure_col(roster_ws, "schedule_raw")
+    active_col = _ensure_col(roster_ws, "active")
 
     roster_records = roster_ws.get_all_records()
 
-    # Find rows that need re-parsing
+    # Deactivate ROSTER rows whose intern is no longer in Team Members
+    deactivated = []
+    for row_idx, r in enumerate(roster_records, start=2):
+        full_name = str(r.get("full_name", "")).strip()
+        if not full_name:
+            continue
+        currently_active = str(r.get("active", "TRUE")).strip().upper() not in ("FALSE", "0", "")
+        in_team_members = _normalize(full_name) in tm_names_normalised
+        if currently_active and not in_team_members:
+            roster_ws.update_cell(row_idx, active_col, "FALSE")
+            deactivated.append(full_name)
+            print(f"  ✗ {full_name}: removed from Team Members — deactivated in ROSTER")
+
+    # Find rows that need schedule re-parsing
     to_parse: list[tuple[int, str, str]] = []  # (row_idx, full_name, new_raw)
     for row_idx, r in enumerate(roster_records, start=2):
         full_name = str(r.get("full_name", "")).strip()
@@ -146,8 +163,11 @@ def main():
         if raw_changed or json_missing:
             to_parse.append((row_idx, full_name, new_raw))
 
-    if not to_parse:
+    if not to_parse and not deactivated:
         print("No schedule changes detected. Nothing to do.")
+        return
+    if not to_parse:
+        print(f"\nDone. Deactivated {len(deactivated)} intern(s), no schedule changes.")
         return
 
     print(f"{len(to_parse)} row(s) changed — re-parsing via Claude...")
@@ -171,7 +191,8 @@ def main():
         else:
             print(f"  ? {full_name}: Claude returned no result — skipping")
 
-    print(f"\nDone. Updated {updated}/{len(to_parse)} row(s).")
+    deact_note = f", deactivated {len(deactivated)}" if deactivated else ""
+    print(f"\nDone. Updated {updated}/{len(to_parse)} schedule row(s){deact_note}.")
 
 
 if __name__ == "__main__":

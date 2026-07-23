@@ -409,11 +409,30 @@ def api_status():
     })
 
 
+_SCHEDULE_KEYS = {
+    "morning_reminder_time", "second_reminder_time", "precut_reminder_time",
+    "report_time", "report_day",
+}
+
+
+def _maybe_reschedule(changed_keys):
+    """Reschedule live APScheduler jobs if any time-related config keys changed."""
+    if not _SCHEDULE_KEYS.intersection(changed_keys):
+        return
+    try:
+        from bot.scheduler import reschedule_time_jobs
+        reschedule_time_jobs()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Live reschedule failed after config save")
+
+
 @app.post("/api/config")
 def api_config():
     _require_api_auth()
     body = request.get_json(force=True)
     sheets.update_config_key(body["key"], body["value"])
+    _maybe_reschedule({body["key"]})
     return jsonify(sheets.get_config().model_dump())
 
 
@@ -424,6 +443,7 @@ def settings_config():
     body = request.get_json(force=True)
     for key, value in body.items():
         sheets.update_config_key(key, str(value))
+    _maybe_reschedule(set(body.keys()))
     return jsonify({"ok": True, "config": sheets.get_config().model_dump()})
 
 

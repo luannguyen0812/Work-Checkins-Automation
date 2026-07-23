@@ -131,6 +131,12 @@ intern_checkin_bot/
 │   └── ...                   # Other debug utilities
 │
 ├── tests/
+│   ├── test_handlers.py       # Check-in message parsing / rejection paths
+│   ├── test_scheduler.py      # Weekly attendance band classification
+│   ├── test_sheets_retry.py   # Sheets API retry/backoff behavior
+│   ├── test_report.py         # Excel report generation
+│   ├── test_risk_model.py     # WAR/RAR/CAS/LCR scoring
+│   └── test_validator.py      # CHECKIN_REGEX matching
 ├── secrets/                  # ← NOT committed (*.json in .gitignore)
 │   └── service-account.json  # Google service account private key
 └── .env                      # ← NOT committed
@@ -267,28 +273,51 @@ score = clamp(raw, 0, 1)
 
 Bands: `score ≥ amber_threshold` → GREEN, `score ≥ red_threshold` → AMBER, else RED.
 
+> **Note:** the weekly report and Telegram DM summary band on raw **WAR%** directly (`< 70%` RED, `70–85%` AMBER, `≥ 85%` GREEN) rather than the composite risk score — this keeps the weekly narrative reading as "attendance this week" while the dashboard's Risk Report keeps the full composite score for longer-term risk triage.
+
 ---
 
 ## Bot Behaviour
 
 ### Check-in detection
-The bot watches every group message (Privacy Mode must be OFF). Messages matching `CHECKIN_REGEX` (e.g. "Good morning, checking in!" / "GM checking in 🌅") are treated as check-ins.
+The bot watches every group message (Privacy Mode must be OFF). `CHECKIN_REGEX` in `bot/validator.py` matches a wide range of phrasing — "I'm online", "checking in", "clocking in", "logged on", "available from 9-5", "GM" variants, apostrophe styles from phone keyboards (`'`/`'`/`'`) — and intentionally excludes bare words like "here" or "present" that produced false positives in regular group chatter.
 
 ### Auto-registration
-When an unregistered intern sends any message, the bot fuzzy-matches their Telegram display name against the ROSTER's `full_name` column. On a confident match it writes their `telegram_user_id` back to the sheet — no manual step needed.
+When an unregistered intern sends any message, the bot fuzzy-matches their Telegram display name against the ROSTER's `full_name` column. On a confident match it writes their `telegram_user_id` back to the sheet — no manual step needed. If a message parses as a valid check-in but the sender can't be matched to any active intern, it's logged to an `UNMATCHED_CHECKINS` sheet tab (reason, Telegram name/username, message text) instead of silently dropped, so misses are auditable.
+
+### Duplicate protection
+Check-ins are deduplicated two ways: by Telegram `message_id` (protects against delivery retries) and by intern + work date (protects against someone checking in twice in one day being counted twice).
 
 ### Scheduled jobs (EDT / America/New_York)
 
 | Time | Days | Job |
 |---|---|---|
-| 09:30 | Mon–Fri | Morning reminder in group |
-| 11:30 | Mon–Fri | Second reminder |
-| 17:45 | Mon–Fri | Pre-cutoff alert |
-| 18:00 | Friday | Generate + DM weekly Excel report to admin |
+| 09:30 (configurable) | Mon–Fri | Morning reminder in group |
+| 11:30 (configurable) | Mon–Fri | Second reminder |
+| 17:45 (configurable) | Mon–Fri | Pre-cutoff alert |
+| Configurable day/time (default Monday 09:30) | Weekly | Generate + DM weekly Excel report to admin |
 | 02:00 | Sunday | Delete CHECKINS_* sheets older than `retention_weeks` |
+
+Reminder times and the weekly report day/time are read from CONFIG and can be changed from the Settings page — the scheduler reschedules its live APScheduler jobs immediately after a config save, with no bot restart needed (`bot/scheduler.py:reschedule_time_jobs()`).
+
+If the bot process starts after the morning reminder window has already passed (e.g. after a crash/restart), it schedules a one-time catch-up reminder 30 minutes later instead of silently skipping the day — but only if the reminder wasn't already sent, verified against today's log file. Jobs also carry a wide misfire grace window (1 hour, coalesced) so a slow tick from system load or sleep/wake doesn't drop a job entirely.
+
+Skips weekends and US federal holidays automatically, including the fixed-date holidays (Juneteenth, July 4th, Veterans Day, Christmas, New Year's) observed on the adjacent weekday when they fall on a weekend — both the actual date and the observed date are excluded from scheduling and from attendance-day counts.
 
 ### Late flag
 An intern is marked `late=True` when their check-in timestamp (EDT) is after their shift's scheduled end time, as defined in ROSTER's `schedule_json` column.
+
+---
+
+## Reliability & Production Hardening
+
+These were added after running the bot live against a 43-person cohort and observing real failure modes:
+
+- **Sheets API retry with backoff** — every read/write to Google Sheets goes through `_with_sheets_retry()`, which retries transient errors (connection resets, timeouts, HTTP 429/5xx) up to 4 times with exponential backoff. A momentary network blip no longer drops a check-in.
+- **In-memory caching** — the roster and CONFIG are cached for 5 minutes (`_interns_cache`, `_config_cache`) to cut down on Sheets API calls during busy check-in windows; both caches are explicitly invalidated on writes (new registration, config save, deactivation).
+- **Attendance counts actual check-ins over stale schedules** — if an intern's stored `schedule_json` doesn't yet reflect a real change (new hire, shift swap), a genuine check-in on an "unscheduled" day still counts as presence rather than being silently excluded from their attendance rate.
+- **Structured logging on every check-in decision** — accepted, rejected (wrong chat, unrecognised user, out-of-range date, duplicate, already checked in today), and validator misses are all logged with the Telegram user ID, username, and message text, making it possible to reconstruct exactly why any given message was or wasn't counted.
+- **Backfill scripts for real incidents** — `scripts/backfill_checkins.py` and `scripts/backfill_2026_07_08.py` document two actual production incidents (bot lacked group admin rights on day one; a validator regex gap missed "online 11-2pm"-style multi-digit time ranges) and the exact manual correction applied, rather than silently patching the sheet by hand.
 
 ---
 

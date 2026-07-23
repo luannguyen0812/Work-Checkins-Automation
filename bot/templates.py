@@ -52,8 +52,8 @@ def weekly_report_dm(
         f"📊 Weekly Intern Attendance Report — Week {week_number} ({date_range})\n\n"
         f"Total interns: {total_interns}\n"
         f"Average attendance rate: {avg_rate:.1f}%\n\n"
-        f"🔴 RED risk ({red_count} interns): {red_names}\n"
-        f"🟡 AMBER risk ({amber_count} interns): {amber_names}\n\n"
+        f"🔴 RED attendance ({red_count} interns): {red_names}\n"
+        f"🟡 AMBER attendance ({amber_count} interns): {amber_names}\n\n"
         f"Full Excel report attached. Executive summary included on Sheet 1.\n\n"
         f"Generated: {timestamp} EDT"
     )

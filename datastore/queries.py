@@ -8,6 +8,8 @@ def _working_days_in_week(
     year: int,
     allowed_weekdays: set[int] = None,
     as_of: date = None,
+    start_date: date = None,
+    end_date: date = None,
 ) -> list[date]:
     """Dates in the given ISO week that fall on the intern's scheduled weekdays.
 
@@ -24,6 +26,10 @@ def _working_days_in_week(
     for i in range(7):
         d = monday + timedelta(days=i)
         if d.weekday() not in allowed_weekdays:
+            continue
+        if start_date is not None and d < start_date:
+            continue
+        if end_date is not None and d > end_date:
             continue
         if is_us_public_holiday(d):
             continue
@@ -83,6 +89,29 @@ def weekly_attendance_rate(checkins: list[CheckIn], intern_id: str, working_days
     return min(1.0, days_checked / len(working_set))
 
 
+def _attendance_days_for_intern(
+    scheduled_days: list[date],
+    checked_dates: set[date],
+    start_date: date,
+    end_date: date,
+    as_of: date,
+) -> list[date]:
+    """Scheduled days plus any actual check-in day.
+
+    Hours are still useful for reminders and expectations, but a real check-in
+    should always count as presence even while schedules are being corrected.
+    """
+    days = {
+        d for d in scheduled_days
+        if start_date <= d <= end_date and d <= as_of
+    }
+    days.update(
+        d for d in checked_dates
+        if start_date <= d <= end_date and d <= as_of
+    )
+    return sorted(days)
+
+
 def rolling_attendance_rate(intern_id: str, weeks: int = 4) -> float:
     """Standalone version — makes individual Sheets calls per week."""
     from datastore import sheets
@@ -139,7 +168,7 @@ def get_non_responders_today(all_interns: list[Intern], todays_checkins: list[Ch
     return [i for i in all_interns if i.active and i.intern_id not in checked_ids]
 
 
-def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
+def compute_all_risk_scores(iso_week: int, year: int, as_of: date = None) -> list[RiskScore]:
     """Optimised: pre-fetches 4 weeks of data in bulk to minimise Sheets API calls."""
     from datastore import sheets
 
@@ -148,7 +177,7 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
     if not active:
         return []
 
-    now = edt_now().date()
+    now = as_of or edt_now().date()
 
     # Pre-fetch 4 weeks of check-in data
     weeks_cache: dict[tuple, list[CheckIn]] = {}
@@ -168,9 +197,25 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
 
     scores = []
     for intern in active:
-        # Each intern is scored only over the weekdays they're scheduled to work.
+        # Start with scheduled workdays, then include actual check-in days even
+        # when the stored schedule is stale or wrong.
         allowed = scheduled_weekdays(intern)
-        working_days = _working_days_in_week(iso_week, year, allowed, as_of=now)
+        scheduled_days = _working_days_in_week(
+            iso_week,
+            year,
+            allowed,
+            as_of=now,
+            start_date=intern.start_date,
+            end_date=intern.end_date,
+        )
+        current_checked = get_checked_dates(intern.intern_id, current_key)
+        working_days = _attendance_days_for_intern(
+            scheduled_days,
+            current_checked,
+            intern.start_date,
+            intern.end_date,
+            now,
+        )
 
         # WAR — only check-ins on scheduled days count
         war = weekly_attendance_rate(current_week_checkins, intern.intern_id, working_days)
@@ -182,10 +227,24 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
             ref_date = now - timedelta(weeks=w)
             ref_iso = ref_date.isocalendar()
             key = (ref_iso.week, ref_iso.year)
-            wd = _working_days_in_week(ref_iso.week, ref_iso.year, allowed, as_of=now)
+            scheduled = _working_days_in_week(
+                ref_iso.week,
+                ref_iso.year,
+                allowed,
+                as_of=now,
+                start_date=intern.start_date,
+                end_date=intern.end_date,
+            )
             checked = get_checked_dates(intern.intern_id, key)
-            checked_days += len({d for d in wd if d in checked})
-            total_days += len(wd)
+            attendance_days = _attendance_days_for_intern(
+                scheduled,
+                checked,
+                intern.start_date,
+                intern.end_date,
+                now,
+            )
+            checked_days += len({d for d in attendance_days if d in checked})
+            total_days += len(attendance_days)
         rar = checked_days / total_days if total_days > 0 else 0.0
 
         # CAS — consecutive absences over scheduled days only
@@ -194,6 +253,12 @@ def compute_all_risk_scores(iso_week: int, year: int) -> list[RiskScore]:
         cutoff = now - timedelta(weeks=4)
         while cas < 20 and d >= cutoff:
             if d.weekday() not in allowed:
+                d -= timedelta(days=1)
+                continue
+            if is_us_public_holiday(d):
+                d -= timedelta(days=1)
+                continue
+            if d < intern.start_date or d > intern.end_date:
                 d -= timedelta(days=1)
                 continue
             d_iso = d.isocalendar()

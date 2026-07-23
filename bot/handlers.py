@@ -17,58 +17,111 @@ logger = get_logger(__name__)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg or not msg.text:
-        return
+    try:
+        msg = update.message
+        if not msg or not msg.text:
+            return
 
-    cfg = sheets.get_config()
-    logger.info("Incoming group msg", extra={"actual_chat_id": msg.chat_id, "configured_chat_id": cfg.group_chat_id})
-    if str(msg.chat_id) != str(cfg.group_chat_id):
-        return
+        if not is_checkin(msg.text):
+            logger.info(
+                "Validator miss",
+                extra={
+                    "telegram_user_id": getattr(msg.from_user, "id", None),
+                    "telegram_name": " ".join(
+                        p for p in [
+                            getattr(msg.from_user, "first_name", None),
+                            getattr(msg.from_user, "last_name", None),
+                        ] if p
+                    ),
+                    "message_text": msg.text[:200],
+                    "chat_id": msg.chat_id,
+                },
+            )
+            return
 
-    if not is_checkin(msg.text):
-        return
+        cfg = sheets.get_config()
+        sender = msg.from_user
+        sender_name = " ".join(
+            part for part in [
+                getattr(sender, "first_name", None),
+                getattr(sender, "last_name", None),
+            ] if part
+        )
+        log_extra = {
+            "actual_chat_id": msg.chat_id,
+            "configured_chat_id": cfg.group_chat_id,
+            "telegram_user_id": sender.id,
+            "telegram_username": getattr(sender, "username", None),
+            "telegram_name": sender_name,
+            "message_id": msg.message_id,
+        }
+        logger.info("Incoming check-in candidate", extra=log_extra)
+        if str(msg.chat_id) != str(cfg.group_chat_id):
+            logger.info("Check-in ignored: wrong chat", extra=log_extra)
+            return
 
-    user_id = msg.from_user.id
-    intern = sheets.get_intern_by_telegram_id(user_id)
+        now_utc = msg.date  # timezone-aware UTC from Telegram
+        now_edt = utc_to_edt(now_utc)
 
-    if intern is None:
-        logger.debug("Unrecognised user attempted check-in", extra={"telegram_user_id": user_id})
-        return  # private bot — no DM to unknown users
+        def write_unmatched(reason: str) -> None:
+            sheets.write_unmatched_checkin(
+                reason=reason,
+                telegram_user_id=sender.id,
+                telegram_username=getattr(sender, "username", None),
+                telegram_name=sender_name,
+                chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                timestamp_utc=now_utc,
+                timestamp_edt=now_edt,
+                message_text=msg.text,
+            )
 
-    now_utc = msg.date  # timezone-aware UTC from Telegram
-    now_edt = utc_to_edt(now_utc)
-    work_date = get_work_date(intern, now_edt)
+        user_id = msg.from_user.id
+        intern = sheets.get_intern_by_telegram_id(user_id)
 
-    if not (intern.start_date <= work_date <= intern.end_date):
-        logger.debug("Check-in outside intern date range", extra={"intern_id": intern.intern_id})
-        return
+        if intern is None:
+            logger.info("Check-in ignored: unrecognised Telegram user", extra=log_extra)
+            write_unmatched("unrecognised_telegram_user")
+            return  # private bot — no DM to unknown users
 
-    week, year = iso_week(now_edt)
-    sheet_name = sheets.checkin_sheet_name(week, year)
+        work_date = get_work_date(intern, now_edt)
 
-    if sheets.checkin_exists(msg.message_id, sheet_name):
-        logger.debug("Duplicate check-in ignored", extra={"message_id": msg.message_id})
-        return
+        if not (intern.start_date <= work_date <= intern.end_date):
+            logger.info("Check-in ignored: outside intern date range", extra={**log_extra, "intern_id": intern.intern_id})
+            write_unmatched("outside_intern_date_range")
+            return
 
-    late_flag = is_late(intern, now_edt)
+        week, year = iso_week(now_edt)
+        sheet_name = sheets.checkin_sheet_name(week, year)
 
-    checkin = CheckIn(
-        date=work_date,
-        intern_id=intern.intern_id,
-        telegram_user_id=user_id,
-        full_name=intern.full_name,
-        checkin_timestamp_utc=now_utc,
-        checkin_timestamp_edt=now_edt,
-        message_text=msg.text[:200],
-        message_id=msg.message_id,
-        validated=True,
-        late=late_flag,
-        week_number=week,
-    )
+        if sheets.checkin_exists(msg.message_id, sheet_name):
+            logger.info("Check-in ignored: duplicate message", extra={**log_extra, "intern_id": intern.intern_id})
+            return
 
-    sheets.write_checkin(checkin)
-    logger.info("Check-in recorded", extra={"intern_id": intern.intern_id, "late": late_flag})
+        if sheets.intern_checked_in_today(intern.intern_id, work_date, sheet_name):
+            logger.info("Check-in ignored: already checked in today", extra={**log_extra, "intern_id": intern.intern_id})
+            return
+
+        late_flag = is_late(intern, now_edt)
+
+        checkin = CheckIn(
+            date=work_date,
+            intern_id=intern.intern_id,
+            telegram_user_id=user_id,
+            full_name=intern.full_name,
+            checkin_timestamp_utc=now_utc,
+            checkin_timestamp_edt=now_edt,
+            message_text=msg.text[:200],
+            message_id=msg.message_id,
+            validated=True,
+            late=late_flag,
+            week_number=week,
+        )
+
+        sheets.write_checkin(checkin)
+        logger.info("Check-in recorded", extra={"intern_id": intern.intern_id, "late": late_flag})
+    except Exception:
+        logger.exception("Check-in handler failed")
 
 
 async def handle_dm_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

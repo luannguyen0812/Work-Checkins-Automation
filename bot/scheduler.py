@@ -1,7 +1,8 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from utils.logger import get_logger
 from utils.time_utils import edt_now, get_work_date, is_working_today, is_us_public_holiday, _parse_schedule, _segment_for_weekday
 
@@ -14,8 +15,15 @@ _bot_loop: asyncio.AbstractEventLoop | None = None
 _nudged_today: set[str] = set()
 _nudge_date: date | None = None
 
+# Tracks whether the morning reminder has been sent today (prevents catch-up duplicates)
+_morning_sent_date: date | None = None
+
+# Module-level scheduler reference so the Flask API can reschedule jobs live
+_scheduler: BackgroundScheduler | None = None
+
 
 TZ = "America/New_York"
+REPORT_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def _hm(t: str) -> tuple[int, int]:
@@ -24,11 +32,26 @@ def _hm(t: str) -> tuple[int, int]:
     return int(h), int(m)
 
 
+def _weekly_attendance_lists(scores):
+    """Return RED/AMBER lists using the Attendance Rates sheet thresholds."""
+    red = [s for s in scores if s.war < 0.70]
+    amber = [s for s in scores if 0.70 <= s.war < 0.85]
+    return red, amber
+
+
 def register_jobs(bot) -> BackgroundScheduler:
     from datastore.sheets import get_config
     cfg = get_config()
 
-    scheduler = BackgroundScheduler(timezone=TZ)
+    # job_defaults.misfire_grace_time: APScheduler's default is 1 second, so any
+    # delay in the scheduler thread (system load, sleep/wake) causes the run to
+    # be logged as "missed" and dropped silently instead of firing late. Give
+    # jobs a wide grace window so they still fire (coalesced to one run) if the
+    # exact tick was missed.
+    scheduler = BackgroundScheduler(
+        timezone=TZ,
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True},
+    )
 
     # NOTE: day_of_week uses APScheduler day-name strings ('mon-fri'), NOT
     # numeric crontab. CronTrigger.from_crontab does not remap crontab's
@@ -39,13 +62,15 @@ def register_jobs(bot) -> BackgroundScheduler:
     mh, mm = _hm(cfg.morning_reminder_time)
     sh, sm = _hm(cfg.second_reminder_time)
     ph, pm = _hm(cfg.precut_reminder_time)
+    rh, rm = _hm(cfg.report_time)
+    report_day = REPORT_DAY_NAMES[cfg.report_day] if 0 <= cfg.report_day < len(REPORT_DAY_NAMES) else "mon"
 
     jobs = [
         ("morning_reminder", CronTrigger(day_of_week="mon-fri", hour=mh, minute=mm, timezone=TZ), _send_morning_reminder),
         ("second_reminder",  CronTrigger(day_of_week="mon-fri", hour=sh, minute=sm, timezone=TZ), _send_second_reminder),
         ("precut_reminder",  CronTrigger(day_of_week="mon-fri", hour=ph, minute=pm, timezone=TZ), _send_precut_reminder),
         ("dm_nudge",         CronTrigger(day_of_week="mon-fri", hour="8-22", minute="*/30", timezone=TZ), _send_dm_nudges),
-        ("weekly_report",    CronTrigger(day_of_week="mon", hour=9, minute=30, timezone=TZ), _generate_and_send_report),
+        ("weekly_report",    CronTrigger(day_of_week=report_day, hour=rh, minute=rm, timezone=TZ), _generate_and_send_report),
         ("data_retention",   CronTrigger(day_of_week="sun", hour=2, minute=0, timezone=TZ), _run_retention_cleanup),
     ]
 
@@ -58,7 +83,103 @@ def register_jobs(bot) -> BackgroundScheduler:
             kwargs={"bot": bot},
         )
 
+    _schedule_catchup_if_missed(scheduler, bot, cfg)
+
+    global _scheduler
+    _scheduler = scheduler
+
     return scheduler
+
+
+def reschedule_time_jobs() -> dict:
+    """
+    Re-read reminder/report times from Sheets and reschedule the four time-sensitive
+    jobs live without restarting the bot. Called by the Flask admin API after a config save.
+    Returns a summary of the new schedule for logging.
+    """
+    from datastore.sheets import get_config
+    if _scheduler is None:
+        raise RuntimeError("Scheduler not initialised yet")
+
+    cfg = get_config()
+    mh, mm = _hm(cfg.morning_reminder_time)
+    sh, sm = _hm(cfg.second_reminder_time)
+    ph, pm = _hm(cfg.precut_reminder_time)
+    rh, rm = _hm(cfg.report_time)
+    report_day = REPORT_DAY_NAMES[cfg.report_day] if 0 <= cfg.report_day < len(REPORT_DAY_NAMES) else "mon"
+
+    updates = {
+        "morning_reminder": CronTrigger(day_of_week="mon-fri", hour=mh, minute=mm, timezone=TZ),
+        "second_reminder":  CronTrigger(day_of_week="mon-fri", hour=sh, minute=sm, timezone=TZ),
+        "precut_reminder":  CronTrigger(day_of_week="mon-fri", hour=ph, minute=pm, timezone=TZ),
+        "weekly_report":    CronTrigger(day_of_week=report_day, hour=rh, minute=rm, timezone=TZ),
+    }
+
+    for job_id, trigger in updates.items():
+        _scheduler.reschedule_job(job_id, trigger=trigger)
+
+    summary = {
+        "morning_reminder": cfg.morning_reminder_time,
+        "second_reminder": cfg.second_reminder_time,
+        "precut_reminder": cfg.precut_reminder_time,
+        "weekly_report": f"{report_day} {cfg.report_time}",
+    }
+    logger.info("Scheduler rescheduled live from config", extra=summary)
+    return summary
+
+
+def _morning_reminder_sent_today() -> bool:
+    """Check today's log file to see if the morning reminder already fired this process or a prior one."""
+    import os, json
+    today_str = edt_now().strftime("%Y-%m-%d")
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    log_path = os.path.join(log_dir, f"bot_{today_str}.log")
+    try:
+        with open(log_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    if entry.get("message") == "Morning reminder sent":
+                        return True
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def _schedule_catchup_if_missed(scheduler: BackgroundScheduler, bot, cfg) -> None:
+    """If the bot started after the morning reminder window, fire a catch-up 30 min from now."""
+    import pytz
+    tz = pytz.timezone(TZ)
+    now = edt_now()
+    today = now.date()
+
+    if today.weekday() >= 5 or is_us_public_holiday(today):
+        return
+
+    mh, mm = _hm(cfg.morning_reminder_time)
+    scheduled_dt = tz.localize(datetime(today.year, today.month, today.day, mh, mm))
+
+    if now <= scheduled_dt:
+        return  # bot started before the window — cron will handle it normally
+
+    if _morning_reminder_sent_today():
+        logger.info("Morning reminder already sent today — skipping catch-up")
+        return
+
+    catchup_dt = now + timedelta(minutes=30)
+    scheduler.add_job(
+        _send_morning_reminder,
+        DateTrigger(run_date=catchup_dt, timezone=TZ),
+        id="morning_reminder_catchup",
+        replace_existing=True,
+        kwargs={"bot": bot},
+    )
+    logger.info(
+        "Morning reminder was missed at startup — catch-up scheduled",
+        extra={"scheduled_for": catchup_dt.strftime("%H:%M:%S")},
+    )
 
 
 def _run_async(coro) -> None:
@@ -76,10 +197,14 @@ def _run_async(coro) -> None:
 
 
 def _send_morning_reminder(bot) -> None:
+    global _morning_sent_date
     from datastore.sheets import get_config
     from bot.templates import morning_reminder
     try:
         today = edt_now().date()
+        if _morning_sent_date == today:
+            logger.info("Morning reminder already sent today — skipping duplicate")
+            return
         if is_us_public_holiday(today):
             logger.info("Skipping morning reminder — US public holiday", extra={"date": str(today)})
             return
@@ -89,6 +214,7 @@ def _send_morning_reminder(bot) -> None:
             return
         text = morning_reminder(cfg.checkin_cutoff_time)
         _run_async(bot.send_message(chat_id=cfg.group_chat_id, text=text))
+        _morning_sent_date = today
         logger.info("Morning reminder sent")
     except Exception:
         logger.exception("Failed to send morning reminder")
@@ -198,18 +324,17 @@ def _generate_and_send_report(bot) -> None:
     try:
         now = edt_now()
         # Report covers the previous full week (Mon–Sun), which ended yesterday (Sunday)
-        last_sunday = now - timedelta(days=now.weekday() + 1)
+        last_sunday = (now - timedelta(days=now.weekday() + 1)).date()
         iso = last_sunday.isocalendar()
         week, year = iso.week, iso.year
 
         report_bytes = generate_report(week, year)
         filename = report_filename(week, year, last_sunday)
 
-        scores = compute_all_risk_scores(week, year)
+        scores = compute_all_risk_scores(week, year, as_of=last_sunday)
         total = len(scores)
         avg_rate = round(sum(s.war for s in scores) / total * 100, 1) if scores else 0.0
-        red = [s for s in scores if s.risk_band == "RED"]
-        amber = [s for s in scores if s.risk_band == "AMBER"]
+        red, amber = _weekly_attendance_lists(scores)
 
         monday = last_sunday - timedelta(days=6)
         date_range = f"{monday.strftime('%b %d')} – {last_sunday.strftime('%b %d, %Y')}"

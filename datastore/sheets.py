@@ -2,10 +2,14 @@ import json
 import os
 import subprocess
 import difflib
+import time
 from datetime import date, datetime
 from typing import Optional
 import gspread
+from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
+from requests.exceptions import ConnectionError, Timeout
 from datastore.models import Intern, CheckIn, Config, Escalation
 
 SCOPES = [
@@ -15,6 +19,30 @@ SCOPES = [
 
 _client: Optional[gspread.Client] = None
 _spreadsheet: Optional[gspread.Spreadsheet] = None
+_CACHE_TTL_SECONDS = 300
+_interns_cache: tuple[float, list[Intern]] | None = None
+_config_cache: tuple[float, Config] | None = None
+
+
+def _is_retryable_sheets_error(exc: Exception) -> bool:
+    if isinstance(exc, (ConnectionError, Timeout, TransportError)):
+        return True
+    if isinstance(exc, APIError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status == 429 or (status is not None and 500 <= status < 600)
+    return False
+
+
+def _with_sheets_retry(fn, *, attempts: int = 4):
+    delay = 1.0
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == attempts or not _is_retryable_sheets_error(exc):
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def _get_spreadsheet() -> gspread.Spreadsheet:
@@ -26,6 +54,20 @@ def _get_spreadsheet() -> gspread.Spreadsheet:
         _client = gspread.authorize(creds)
         _spreadsheet = _client.open_by_key(os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"])
     return _spreadsheet
+
+
+def _cache_fresh(ts: float) -> bool:
+    return time.monotonic() - ts < _CACHE_TTL_SECONDS
+
+
+def _invalidate_roster_cache() -> None:
+    global _interns_cache
+    _interns_cache = None
+
+
+def _invalidate_config_cache() -> None:
+    global _config_cache
+    _config_cache = None
 
 
 CLAUDE_BIN = "/usr/local/bin/claude"
@@ -77,29 +119,90 @@ def checkin_sheet_name(iso_week: int, year: int) -> str:
 def get_source_team_members() -> list[dict]:
     """Read directly from 'Team Members' tab — the source of truth roster."""
     ss = _get_spreadsheet()
-    ws = ss.worksheet("Team Members")
-    return ws.get_all_records()
+    ws = _with_sheets_retry(lambda: ss.worksheet("Team Members"))
+    return _with_sheets_retry(ws.get_all_records)
 
 
 def _get_or_create_checkin_sheet(sheet_name: str) -> gspread.Worksheet:
     ss = _get_spreadsheet()
     try:
-        return ss.worksheet(sheet_name)
+        return _with_sheets_retry(lambda: ss.worksheet(sheet_name))
     except gspread.WorksheetNotFound:
         headers = [
             "date", "intern_id", "telegram_user_id", "full_name",
             "checkin_timestamp_utc", "checkin_timestamp_edt",
             "message_text", "message_id", "validated", "late", "week_number",
         ]
-        ws = ss.add_worksheet(title=sheet_name, rows=5000, cols=len(headers))
-        ws.append_row(headers)
+        ws = _with_sheets_retry(lambda: ss.add_worksheet(title=sheet_name, rows=5000, cols=len(headers)))
+        _with_sheets_retry(lambda: ws.append_row(headers))
         return ws
 
 
-def get_all_interns() -> list[Intern]:
+def _get_or_create_unmatched_checkins_sheet() -> gspread.Worksheet:
     ss = _get_spreadsheet()
-    ws = ss.worksheet("ROSTER")
-    records = ws.get_all_records()
+    try:
+        return _with_sheets_retry(lambda: ss.worksheet("UNMATCHED_CHECKINS"))
+    except gspread.WorksheetNotFound:
+        headers = [
+            "date", "reason", "telegram_user_id", "telegram_username",
+            "telegram_name", "chat_id", "message_id", "timestamp_utc",
+            "timestamp_edt", "message_text",
+        ]
+        ws = _with_sheets_retry(lambda: ss.add_worksheet(title="UNMATCHED_CHECKINS", rows=1000, cols=len(headers)))
+        _with_sheets_retry(lambda: ws.append_row(headers))
+        return ws
+
+
+def unmatched_checkin_exists(telegram_user_id: int, message_id: int) -> bool:
+    try:
+        ws = _get_or_create_unmatched_checkins_sheet()
+        records = _with_sheets_retry(ws.get_all_records)
+        return any(
+            int(r.get("telegram_user_id", 0)) == telegram_user_id
+            and int(r.get("message_id", 0)) == message_id
+            for r in records
+        )
+    except gspread.WorksheetNotFound:
+        return False
+
+
+def write_unmatched_checkin(
+    *,
+    reason: str,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    telegram_name: str,
+    chat_id: int,
+    message_id: int,
+    timestamp_utc: datetime,
+    timestamp_edt: datetime,
+    message_text: str,
+) -> None:
+    if unmatched_checkin_exists(telegram_user_id, message_id):
+        return
+    ws = _get_or_create_unmatched_checkins_sheet()
+    _with_sheets_retry(lambda: ws.append_row([
+        timestamp_edt.date().isoformat(),
+        reason,
+        telegram_user_id,
+        telegram_username or "",
+        telegram_name,
+        chat_id,
+        message_id,
+        timestamp_utc.isoformat(),
+        timestamp_edt.isoformat(),
+        message_text[:200],
+    ]))
+
+
+def get_all_interns() -> list[Intern]:
+    global _interns_cache
+    if _interns_cache and _cache_fresh(_interns_cache[0]):
+        return list(_interns_cache[1])
+
+    ss = _get_spreadsheet()
+    ws = _with_sheets_retry(lambda: ss.worksheet("ROSTER"))
+    records = _with_sheets_retry(ws.get_all_records)
     interns = []
     for r in records:
         if not r.get("intern_id"):
@@ -121,7 +224,8 @@ def get_all_interns() -> list[Intern]:
             ))
         except Exception:
             continue
-    return interns
+    _interns_cache = (time.monotonic(), interns)
+    return list(interns)
 
 
 def get_intern_by_telegram_id(telegram_user_id: int) -> Optional[Intern]:
@@ -165,7 +269,7 @@ def is_already_registered(telegram_user_id: int) -> bool:
 def register_intern_from_dm(telegram_user_id: int, telegram_username: Optional[str], member: dict) -> None:
     """Append a self-registered intern to the ROSTER sheet."""
     ss = _get_spreadsheet()
-    ws = ss.worksheet("ROSTER")
+    ws = _with_sheets_retry(lambda: ss.worksheet("ROSTER"))
     full_name = _extract_name(member)
     intern_id = str(
         member.get("intern_id") or member.get("Intern ID") or member.get("id") or
@@ -180,18 +284,19 @@ def register_intern_from_dm(telegram_user_id: int, telegram_username: Optional[s
         member.get("preferred_shift") or ""
     ).strip()
     schedule_json = _parse_schedule_via_claude(raw_schedule)
-    ws.append_row([
+    _with_sheets_retry(lambda: ws.append_row([
         intern_id, full_name, telegram_user_id,
         telegram_username or "", cohort, start_date, end_date,
         "TRUE", email, "self-registered via DM", schedule_json, raw_schedule,
-    ])
+    ]))
+    _invalidate_roster_cache()
 
 
 def write_checkin(checkin: CheckIn) -> None:
     year = checkin.checkin_timestamp_utc.year
     sheet_name = checkin_sheet_name(checkin.week_number, year)
     ws = _get_or_create_checkin_sheet(sheet_name)
-    ws.append_row([
+    _with_sheets_retry(lambda: ws.append_row([
         checkin.date.isoformat(),
         checkin.intern_id,
         checkin.telegram_user_id,
@@ -203,15 +308,30 @@ def write_checkin(checkin: CheckIn) -> None:
         str(checkin.validated),
         str(checkin.late),
         checkin.week_number,
-    ])
+    ]))
 
 
 def checkin_exists(message_id: int, week_sheet_name: str) -> bool:
     ss = _get_spreadsheet()
     try:
-        ws = ss.worksheet(week_sheet_name)
-        records = ws.get_all_records()
+        ws = _with_sheets_retry(lambda: ss.worksheet(week_sheet_name))
+        records = _with_sheets_retry(ws.get_all_records)
         return any(int(r.get("message_id", 0)) == message_id for r in records)
+    except gspread.WorksheetNotFound:
+        return False
+
+
+def intern_checked_in_today(intern_id: str, work_date, week_sheet_name: str) -> bool:
+    """Return True if this intern already has a check-in row for work_date today."""
+    ss = _get_spreadsheet()
+    try:
+        ws = _with_sheets_retry(lambda: ss.worksheet(week_sheet_name))
+        records = _with_sheets_retry(ws.get_all_records)
+        date_str = work_date.isoformat()
+        return any(
+            str(r.get("intern_id", "")) == str(intern_id) and str(r.get("date", "")) == date_str
+            for r in records
+        )
     except gspread.WorksheetNotFound:
         return False
 
@@ -220,10 +340,10 @@ def get_checkins_for_week(iso_week: int, year: int) -> list[CheckIn]:
     ss = _get_spreadsheet()
     sheet_name = checkin_sheet_name(iso_week, year)
     try:
-        ws = ss.worksheet(sheet_name)
+        ws = _with_sheets_retry(lambda: ss.worksheet(sheet_name))
     except gspread.WorksheetNotFound:
         return []
-    records = ws.get_all_records()
+    records = _with_sheets_retry(ws.get_all_records)
     checkins = []
     for r in records:
         try:
@@ -246,9 +366,13 @@ def get_checkins_for_week(iso_week: int, year: int) -> list[CheckIn]:
 
 
 def get_config() -> Config:
+    global _config_cache
+    if _config_cache and _cache_fresh(_config_cache[0]):
+        return _config_cache[1]
+
     ss = _get_spreadsheet()
-    ws = ss.worksheet("CONFIG")
-    records = ws.get_all_records()
+    ws = _with_sheets_retry(lambda: ss.worksheet("CONFIG"))
+    records = _with_sheets_retry(ws.get_all_records)
     kv = {r["key"]: str(r["value"]) for r in records if r.get("key")}
 
     def _int_or(key, default):
@@ -274,7 +398,7 @@ def get_config() -> Config:
     if not admin_telegram_id and os.environ.get("ADMIN_TELEGRAM_USER_ID"):
         admin_telegram_id = int(os.environ["ADMIN_TELEGRAM_USER_ID"])
 
-    return Config(
+    cfg = Config(
         checkin_cutoff_time=kv.get("checkin_cutoff_time", "17:00"),
         morning_reminder_time=kv.get("morning_reminder_time", "09:30"),
         second_reminder_time=kv.get("second_reminder_time", "11:30"),
@@ -290,30 +414,34 @@ def get_config() -> Config:
         admin_email=kv.get("admin_email", "minhluan081294@gmail.com"),
         group_chat_id=group_chat_id,
     )
+    _config_cache = (time.monotonic(), cfg)
+    return cfg
 
 
 def update_config_key(key: str, value: str) -> None:
     ss = _get_spreadsheet()
-    ws = ss.worksheet("CONFIG")
-    records = ws.get_all_records()
+    ws = _with_sheets_retry(lambda: ss.worksheet("CONFIG"))
+    records = _with_sheets_retry(ws.get_all_records)
     for idx, r in enumerate(records, start=2):  # row 1 is header
         if r.get("key") == key:
-            ws.update_cell(idx, 2, value)
+            _with_sheets_retry(lambda: ws.update_cell(idx, 2, value))
+            _invalidate_config_cache()
             return
-    ws.append_row([key, value])
+    _with_sheets_retry(lambda: ws.append_row([key, value]))
+    _invalidate_config_cache()
 
 
 def write_escalation(escalation: Escalation) -> None:
     ss = _get_spreadsheet()
-    ws = ss.worksheet("ESCALATIONS")
-    ws.append_row([
+    ws = _with_sheets_retry(lambda: ss.worksheet("ESCALATIONS"))
+    _with_sheets_retry(lambda: ws.append_row([
         escalation.date.isoformat(),
         escalation.intern_id,
         escalation.trigger,
         escalation.action_taken,
         escalation.resolved_date.isoformat() if escalation.resolved_date else "",
         escalation.notes or "",
-    ])
+    ]))
 
 
 def get_checkins_for_date(target_date: date) -> list[CheckIn]:
@@ -323,25 +451,26 @@ def get_checkins_for_date(target_date: date) -> list[CheckIn]:
 
 def deactivate_intern(intern_id: str) -> None:
     ss = _get_spreadsheet()
-    ws = ss.worksheet("ROSTER")
-    headers = ws.row_values(1)
+    ws = _with_sheets_retry(lambda: ss.worksheet("ROSTER"))
+    headers = _with_sheets_retry(lambda: ws.row_values(1))
     col = headers.index("active") + 1
-    records = ws.get_all_records()
+    records = _with_sheets_retry(ws.get_all_records)
     for idx, r in enumerate(records, start=2):
         if str(r.get("intern_id")) == intern_id:
-            ws.update_cell(idx, col, "FALSE")
+            _with_sheets_retry(lambda: ws.update_cell(idx, col, "FALSE"))
+            _invalidate_roster_cache()
             return
 
 
 def list_checkin_sheet_names() -> list[str]:
     ss = _get_spreadsheet()
-    return [ws.title for ws in ss.worksheets() if ws.title.startswith("CHECKINS_")]
+    return [ws.title for ws in _with_sheets_retry(ss.worksheets) if ws.title.startswith("CHECKINS_")]
 
 
 def delete_worksheet(title: str) -> None:
     ss = _get_spreadsheet()
     try:
-        ws = ss.worksheet(title)
-        ss.del_worksheet(ws)
+        ws = _with_sheets_retry(lambda: ss.worksheet(title))
+        _with_sheets_retry(lambda: ss.del_worksheet(ws))
     except gspread.WorksheetNotFound:
         pass
