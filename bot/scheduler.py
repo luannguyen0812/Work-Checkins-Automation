@@ -182,16 +182,16 @@ def _schedule_catchup_if_missed(scheduler: BackgroundScheduler, bot, cfg) -> Non
     )
 
 
-def _run_async(coro) -> None:
+def _run_async(coro):
     """Submit a coroutine to the bot's event loop from a background scheduler thread."""
     if _bot_loop is not None and _bot_loop.is_running():
         future = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
-        future.result(timeout=30)
+        return future.result(timeout=30)
     else:
         # Fallback before the loop is captured (shouldn't happen in practice)
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(coro)
+            return loop.run_until_complete(coro)
         finally:
             loop.close()
 
@@ -255,6 +255,33 @@ def _send_precut_reminder(bot) -> None:
         logger.exception("Failed to send pre-cutoff reminder")
 
 
+async def _send_all_nudges(bot, targets: list[tuple[str, int, str]]) -> list[tuple[str, bool]]:
+    """Send all DM nudges concurrently on the bot's event loop and return
+    per-intern (intern_id, success) results.
+
+    Previously each nudge was sent via its own blocking _run_async() round-trip
+    from the scheduler thread -- N sequential cross-thread submissions in a
+    row. With a full cohort that could take several seconds, during which the
+    bot's single event loop was busy servicing those submissions instead of
+    promptly reading the concurrently-running long-poll getUpdates response,
+    occasionally causing Telegram's client library to retry prematurely and
+    collide with its own still-in-flight request (telegram.error.Conflict).
+    One batched gather() is a single cross-thread submission regardless of
+    cohort size."""
+    async def _send_one(intern_id: str, telegram_user_id: int, first_name: str) -> tuple[str, bool]:
+        try:
+            await bot.send_message(
+                chat_id=telegram_user_id,
+                text=f"Hey {first_name}, don't forget to check in! "
+                     f"Send \"I'm online\" in the intern group. 👋",
+            )
+            return (intern_id, True)
+        except Exception:
+            return (intern_id, False)
+
+    return await asyncio.gather(*(_send_one(*t) for t in targets))
+
+
 def _send_dm_nudges(bot) -> None:
     """
     Runs every 30 min Mon–Fri. For each intern whose shift started > 30 min ago
@@ -279,6 +306,7 @@ def _send_dm_nudges(bot) -> None:
         interns = [i for i in get_all_interns() if i.active]
         checked_in_ids = get_todays_checkin_intern_ids(today)
 
+        targets: list[tuple[str, int, str]] = []
         for intern in interns:
             if intern.intern_id in checked_in_ids:
                 continue
@@ -299,17 +327,18 @@ def _send_dm_nudges(bot) -> None:
             # No schedule stored: fall through and nudge (conservative)
 
             if intern.telegram_user_id:
-                first_name = intern.full_name.split()[0]
-                try:
-                    _run_async(bot.send_message(
-                        chat_id=intern.telegram_user_id,
-                        text=f"Hey {first_name}, don't forget to check in! "
-                             f"Send \"I'm online\" in the intern group. 👋",
-                    ))
-                    _nudged_today.add(intern.intern_id)
-                    logger.info("DM nudge sent", extra={"intern_id": intern.intern_id})
-                except Exception:
-                    logger.warning("DM nudge failed", extra={"intern_id": intern.intern_id})
+                targets.append((intern.intern_id, intern.telegram_user_id, intern.full_name.split()[0]))
+
+        if not targets:
+            return
+
+        results = _run_async(_send_all_nudges(bot, targets))
+        for intern_id, success in results:
+            if success:
+                _nudged_today.add(intern_id)
+                logger.info("DM nudge sent", extra={"intern_id": intern_id})
+            else:
+                logger.warning("DM nudge failed", extra={"intern_id": intern_id})
     except Exception:
         logger.exception("DM nudge job failed")
 
